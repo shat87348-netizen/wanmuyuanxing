@@ -1,0 +1,1202 @@
+<template>
+  <div class="enhanced-viz">
+    <!-- 顶部工具栏：试验任务 + 操作按钮 -->
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <label class="toolbar-label">试验任务</label>
+        <UiSelect v-model:value="selectedExperimentTask" class="task-filter-select" placeholder="请选择试验任务">
+          <UiSelectOption value="">全部试验任务</UiSelectOption>
+          <UiSelectOption v-for="task in experimentTaskOptions" :key="task.value" :value="task.value">
+            {{ task.label }}
+          </UiSelectOption>
+        </UiSelect>
+      </div>
+      <div class="toolbar-right">
+        <button type="button" class="toolbar-btn" @click="exportConfig">导出配置</button>
+        <button type="button" class="toolbar-btn" @click="triggerImport">导入配置</button>
+        <button type="button" class="toolbar-btn toolbar-btn-primary" @click="addChartWidget">+ 新增曲线</button>
+        <button type="button" class="toolbar-btn toolbar-btn-primary" @click="addTableWidget">+ 新增表格</button>
+      </div>
+    </div>
+
+    <!-- 网格容器 -->
+    <div
+      ref="gridRef"
+      class="grid-container"
+      :class="{ 'is-interacting': interacting }"
+      :style="{ height: containerHeight + 'px' }"
+    >
+      <div v-if="interacting" class="grid-bg" :style="gridBgStyle"></div>
+
+      <div
+        v-for="widget in widgets"
+        :key="widget.id"
+        class="widget"
+        :class="{ 'widget-active': dragState?.widget?.id === widget.id }"
+        :style="widgetStyle(widget)"
+      >
+        <div class="widget-header" @mousedown="onDragStart(widget, $event)">
+          <span class="widget-title">{{ widget.title }}</span>
+          <div class="widget-actions">
+            <ParamTreeSelect
+              v-if="widget.type === 'chart' || widget.type === 'table'"
+              v-model="widget.params"
+              class="widget-param-select"
+              :telemetry-data="vizTelemetryCache"
+              :placeholder="widget.type === 'chart' ? '选择服务器协议数据' : '选择服务器协议数据'"
+              :max-tag-count="2"
+              @mousedown.stop
+              @update:modelValue="onWidgetParamsChange(widget, $event)"
+            />
+            <button
+              type="button"
+              class="widget-close"
+              aria-label="移除"
+              @mousedown.stop
+              @click="removeWidget(widget.id)"
+            >×</button>
+          </div>
+        </div>
+
+        <div class="widget-body">
+          <div v-if="widget.type === 'chart'" :ref="el => setChartRef(widget, el)" class="widget-chart"></div>
+
+          <div v-else-if="widget.type === 'table'" class="widget-scroll">
+            <UiTable
+              :columns="columns"
+              :data-source="widget.rows || []"
+              size="small"
+              :pagination="false"
+              row-key="key"
+              :locale="{ emptyText: '暂无数据' }"
+            >
+              <template #bodyCell="{ column, record }">
+                <template v-if="column.key === 'protocol'">
+                  <UiTag :color="getProtocolColor(record.protocol)">{{ record.protocol }}</UiTag>
+                </template>
+                <template v-if="column.key === 'type'">
+                  <UiTag :color="getTypeColor(record.paramType)">{{ record.paramType }}</UiTag>
+                </template>
+                <template v-if="column.key === 'status'">
+                  <UiTag :color="record.status === '正常' ? 'success' : 'error'">{{ record.status }}</UiTag>
+                </template>
+              </template>
+            </UiTable>
+          </div>
+
+          <div v-else-if="widget.type === 'alarm'" class="widget-scroll">
+            <UiTable
+              :columns="alarmColumns"
+              :data-source="alarmTableData"
+              size="small"
+              :pagination="false"
+              row-key="key"
+              :locale="{ emptyText: '暂无告警' }"
+            >
+              <template #bodyCell="{ column, record }">
+                <template v-if="column.key === 'time'">
+                  <span class="alarm-time">{{ formatAlarmTime(record.alarmTime) }}</span>
+                </template>
+                <template v-if="column.key === 'currentValue'">
+                  <span :class="['alarm-current-value', alarmDirectionClass(record.thresholdType)]">
+                    <span class="alarm-direction">{{ alarmDirectionIcon(record.thresholdType) }}</span>
+                    {{ formatAlarmValue(record.currentValue, record.unit) }}
+                  </span>
+                </template>
+                <template v-if="column.key === 'threshold'">
+                  <span>{{ formatAlarmValue(record.thresholdValue, record.unit) }}</span>
+                </template>
+              </template>
+            </UiTable>
+          </div>
+
+          <div v-else-if="widget.type === 'image'" class="widget-image">
+            <PictureOutlined class="placeholder-icon" />
+            <p>等待图像数据...</p>
+          </div>
+        </div>
+
+        <div class="widget-resize" @mousedown.stop="onResizeStart(widget, $event)"></div>
+      </div>
+    </div>
+
+    <input ref="fileInputRef" type="file" accept=".json" style="display:none" @change="onImportFile" />
+  </div>
+</template>
+
+<script setup>
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import * as echarts from 'echarts'
+import { telemetryApi, processTaskApi, alarmApi } from '../api'
+import { getRuntimeConfig, isMockEnabled } from '../config/runtime'
+import ParamTreeSelect from './ParamTreeSelect.vue'
+
+const COLS = 24
+const ROW_H = 30
+const GAP = 8
+const LAYOUT_STORAGE_KEY = 'viz.layout.v1'
+
+const selectedExperimentTask = ref('')
+const tasks = ref([])
+const alarms = ref([])
+const vizTelemetryCache = ref([])
+
+const colors = ['#5470C6', '#91CC75', '#FAC858', '#EE6666', '#73C0DE', '#3BA272', '#FC8452', '#9A60B4']
+const maxDataPoints = 50
+
+let simTimer = null
+let alarmTimer = null
+let alarmSocket = null
+
+const gridRef = ref(null)
+const fileInputRef = ref(null)
+const colWidth = ref(0)
+const dragState = ref(null)
+const interacting = computed(() => dragState.value !== null)
+let resizeObserver = null
+
+const chartInstances = new Map()
+
+const widgets = ref(loadLayout() || defaultWidgets())
+
+function defaultWidgets() {
+  return [
+    {
+      id: 'chart-default',
+      type: 'chart',
+      title: '实时曲线',
+      x: 0, y: 0, w: 12, h: 11,
+      params: [],
+      dataMap: {},
+    },
+    {
+      id: 'table-default',
+      type: 'table',
+      title: '实时数据',
+      x: 12, y: 0, w: 12, h: 11,
+      params: [],
+      rows: [],
+    },
+    {
+      id: 'alarm-default',
+      type: 'alarm',
+      title: '实时告警',
+      x: 0, y: 11, w: 12, h: 9,
+    },
+    {
+      id: 'image-default',
+      type: 'image',
+      title: '载荷图像',
+      x: 12, y: 11, w: 12, h: 9,
+    },
+  ]
+}
+
+function loadLayout() {
+  try {
+    const raw = localStorage.getItem(LAYOUT_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed) || parsed.length === 0) return null
+    return parsed.map(w => ({
+      ...w,
+      params: w.params || [],
+      dataMap: w.type === 'chart' ? {} : undefined,
+      rows: w.type === 'table' ? [] : undefined,
+    }))
+  } catch {
+    return null
+  }
+}
+
+function saveLayout() {
+  try {
+    const serialized = widgets.value.map(w => ({
+      id: w.id,
+      type: w.type,
+      title: w.title,
+      x: w.x, y: w.y, w: w.w, h: w.h,
+      params: w.params || [],
+    }))
+    localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(serialized))
+  } catch (e) {
+    console.warn('[viz] saveLayout error', e)
+  }
+}
+
+const containerHeight = computed(() => {
+  const maxY = widgets.value.reduce((m, w) => Math.max(m, w.y + w.h), 0)
+  return Math.max(560, maxY * (ROW_H + GAP) + 40)
+})
+
+const gridBgStyle = computed(() => {
+  const cw = colWidth.value
+  if (cw <= 0) return {}
+  return {
+    backgroundSize: `${cw + GAP}px ${ROW_H + GAP}px`,
+    backgroundPosition: `0 0`,
+  }
+})
+
+const widgetStyle = (w) => {
+  const cw = colWidth.value
+  return {
+    left: `${w.x * (cw + GAP)}px`,
+    top: `${w.y * (ROW_H + GAP)}px`,
+    width: `${w.w * cw + (w.w - 1) * GAP}px`,
+    height: `${w.h * ROW_H + (w.h - 1) * GAP}px`,
+  }
+}
+
+const recomputeColWidth = () => {
+  const el = gridRef.value
+  if (!el) return
+  const totalGap = (COLS - 1) * GAP
+  colWidth.value = Math.max(20, (el.clientWidth - totalGap) / COLS)
+}
+
+const onDragStart = (widget, event) => {
+  if (event.button !== 0) return
+  event.preventDefault()
+  dragState.value = {
+    widget,
+    mode: 'move',
+    startX: event.clientX,
+    startY: event.clientY,
+    origX: widget.x,
+    origY: widget.y,
+  }
+  document.addEventListener('mousemove', onDragMove)
+  document.addEventListener('mouseup', onDragEnd)
+}
+
+const onResizeStart = (widget, event) => {
+  if (event.button !== 0) return
+  event.preventDefault()
+  dragState.value = {
+    widget,
+    mode: 'resize',
+    startX: event.clientX,
+    startY: event.clientY,
+    origW: widget.w,
+    origH: widget.h,
+  }
+  document.addEventListener('mousemove', onDragMove)
+  document.addEventListener('mouseup', onDragEnd)
+}
+
+let pendingResize = null
+const onDragMove = (event) => {
+  const s = dragState.value
+  if (!s) return
+  const cw = colWidth.value
+  if (cw <= 0) return
+  const colStep = cw + GAP
+  const rowStep = ROW_H + GAP
+  const dx = event.clientX - s.startX
+  const dy = event.clientY - s.startY
+  const colDelta = Math.round(dx / colStep)
+  const rowDelta = Math.round(dy / rowStep)
+
+  if (s.mode === 'move') {
+    s.widget.x = Math.max(0, Math.min(COLS - s.widget.w, s.origX + colDelta))
+    s.widget.y = Math.max(0, s.origY + rowDelta)
+  } else {
+    s.widget.w = Math.max(3, Math.min(COLS - s.widget.x, s.origW + colDelta))
+    s.widget.h = Math.max(4, s.origH + rowDelta)
+    if (s.widget.type === 'chart') {
+      if (pendingResize) cancelAnimationFrame(pendingResize)
+      pendingResize = requestAnimationFrame(() => {
+        const inst = chartInstances.get(s.widget.id)
+        if (inst) inst.resize()
+      })
+    }
+  }
+}
+
+const onDragEnd = () => {
+  document.removeEventListener('mousemove', onDragMove)
+  document.removeEventListener('mouseup', onDragEnd)
+  const s = dragState.value
+  dragState.value = null
+  if (s && s.widget.type === 'chart') {
+    nextTick(() => {
+      const inst = chartInstances.get(s.widget.id)
+      if (inst) inst.resize()
+    })
+  }
+  saveLayout()
+}
+
+const setChartRef = (widget, el) => {
+  if (el) {
+    if (!chartInstances.has(widget.id)) {
+      nextTick(() => {
+        if (chartInstances.has(widget.id)) return
+        const inst = echarts.init(el)
+        chartInstances.set(widget.id, inst)
+        if ((!widget.params || widget.params.length === 0) && vizTelemetryCache.value.length > 0) {
+          widget.params = pickDefaultParams()
+        }
+        widget.dataMap = widget.dataMap || {}
+        generateInitialData(widget)
+        updateChartWidget(widget)
+      })
+    }
+  } else if (chartInstances.has(widget.id)) {
+    chartInstances.get(widget.id).dispose()
+    chartInstances.delete(widget.id)
+  }
+}
+
+const addChartWidget = () => {
+  const id = `chart-${Date.now()}`
+  const w = 12
+  const h = 11
+  const y = nextRowAvailable(w, h)
+  widgets.value.push({
+    id,
+    type: 'chart',
+    title: '实时曲线',
+    x: 0, y, w, h,
+    params: [],
+    dataMap: {},
+  })
+  saveLayout()
+}
+
+const addTableWidget = () => {
+  const id = `table-${Date.now()}`
+  const w = 12
+  const h = 11
+  const y = nextRowAvailable(w, h)
+  widgets.value.push({
+    id,
+    type: 'table',
+    title: '实时数据',
+    x: 0, y, w, h,
+    params: [],
+    rows: [],
+  })
+  saveLayout()
+}
+
+function nextRowAvailable() {
+  return widgets.value.reduce((m, w) => Math.max(m, w.y + w.h), 0)
+}
+
+const removeWidget = (id) => {
+  const idx = widgets.value.findIndex(w => w.id === id)
+  if (idx < 0) return
+  const widget = widgets.value[idx]
+  if (widget.type === 'chart' && chartInstances.has(id)) {
+    chartInstances.get(id).dispose()
+    chartInstances.delete(id)
+  }
+  widgets.value.splice(idx, 1)
+  saveLayout()
+  syncSimulationTimer()
+}
+
+const onWidgetParamsChange = (widget, params) => {
+  widget.params = params
+  if (widget.type === 'chart') {
+    widget.dataMap = {}
+    params.forEach(p => { widget.dataMap[p] = [] })
+    generateInitialData(widget)
+    updateChartWidget(widget)
+  } else if (widget.type === 'table') {
+    widget.rows = makeTableRows(params, Date.now())
+  }
+  syncSimulationTimer()
+  saveLayout()
+}
+
+const exportConfig = () => {
+  const payload = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    widgets: widgets.value.map(w => ({
+      id: w.id,
+      type: w.type,
+      title: w.title,
+      x: w.x, y: w.y, w: w.w, h: w.h,
+      params: w.params || [],
+    })),
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `viz-config-${new Date().toISOString().slice(0, 10)}.json`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+const triggerImport = () => fileInputRef.value?.click()
+
+const onImportFile = (event) => {
+  const file = event.target.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result)
+      const incoming = Array.isArray(data?.widgets) ? data.widgets : (Array.isArray(data) ? data : null)
+      if (!incoming) throw new Error('配置文件格式不正确')
+      chartInstances.forEach(inst => inst.dispose())
+      chartInstances.clear()
+      widgets.value = incoming.map(w => ({
+        ...w,
+        params: w.params || [],
+        dataMap: w.type === 'chart' ? {} : undefined,
+        rows: w.type === 'table' ? [] : undefined,
+      }))
+      saveLayout()
+      nextTick(() => {
+        widgets.value.forEach(widget => {
+          if (widget.type === 'chart') {
+            generateInitialData(widget)
+            updateChartWidget(widget)
+          } else if (widget.type === 'table') {
+            widget.rows = makeTableRows(widget.params, Date.now())
+          }
+        })
+        syncSimulationTimer()
+      })
+    } catch (err) {
+      console.error('导入失败', err)
+      window.alert('导入失败：' + err.message)
+    } finally {
+      event.target.value = ''
+    }
+  }
+  reader.readAsText(file)
+}
+
+const fallbackExperimentTasks = [
+  { value: 'telemetry-joint-test', label: '综合遥测试验任务' },
+  { value: 'link-stability-test', label: '链路稳定性试验任务' },
+  { value: 'payload-parameter-test', label: '载荷参数试验任务' },
+]
+
+const taskOptionLabel = (task) => task?.taskName || task?.name || task?.title || `试验任务 ${task?.id || ''}`.trim()
+const taskOptionValue = (task) => String(task?.id ?? task?.taskId ?? task?.taskName ?? task?.name ?? '')
+
+const experimentTaskOptions = computed(() => {
+  const source = Array.isArray(tasks.value) ? tasks.value : []
+  const options = source.map(t => ({ value: taskOptionValue(t), label: taskOptionLabel(t) })).filter(o => o.value && o.label)
+  return options.length ? options : fallbackExperimentTasks
+})
+
+const alarmTableData = computed(() => alarms.value.map((item, index) => ({ ...item, key: item.id || index })))
+
+const columns = [
+  { title: '服务器', dataIndex: 'serverName', width: 150 },
+  { title: '协议', key: 'protocol', width: 90 },
+  { title: '类型', key: 'type', width: 70 },
+  { title: '数据项', dataIndex: 'paramName', width: 100 },
+  { title: '值', dataIndex: 'paramValue', width: 90 },
+  { title: '状态', key: 'status', width: 55 },
+]
+
+const alarmColumns = [
+  { title: '时间', key: 'time', width: 115 },
+  { title: '参数名称', dataIndex: 'paramName', width: 100 },
+  { title: '当前值', key: 'currentValue', width: 100 },
+  { title: '阈值', key: 'threshold', width: 90 },
+]
+
+const getProtocolColor = (protocol) => ({ Protobuf: 'purple', PDXP: 'cyan', JSON: 'green' }[protocol] || 'default')
+const getTypeColor = (t) => ({ 遥测: 'cyan', 遥感: 'green', 设备: 'gold', 环境: 'red', 任务: 'blue', 态势: 'orange', 状态: 'lime' }[t] || 'default')
+
+const getTimestamp = (item) => {
+  const value = item.timestamp || item.collectTime || item.time || item.createdAt
+  const date = value ? new Date(value) : new Date()
+  return Number.isNaN(date.getTime()) ? Date.now() : date.getTime()
+}
+
+const parseValue = (value) => {
+  if (typeof value === 'number') return value
+  const match = String(value ?? '').match(/-?\d+(?:\.\d+)?/)
+  return match ? Number(match[0]) : 0
+}
+
+const lanServers = [
+  { id: 'srv-a', name: '采集服务器-A', ip: '192.168.10.21' },
+  { id: 'srv-b', name: '采集服务器-B', ip: '192.168.10.22' },
+  { id: 'srv-c', name: '处理服务器-C', ip: '192.168.10.31' },
+  { id: 'srv-d', name: '转发服务器-D', ip: '192.168.10.41' },
+]
+
+const runtimeProtocols = ['Protobuf', 'PDXP', 'JSON']
+
+const serverLabel = (server) => `${server.name} (${server.ip})`
+
+const detectProtocol = (item, index = 0) => {
+  const raw = String(item?.protocol || item?.protocolType || item?.channel || item?.sourceInterface || '').toUpperCase()
+  if (raw.includes('PROTO')) return 'Protobuf'
+  if (raw.includes('PDXP')) return 'PDXP'
+  if (raw.includes('JSON')) return 'JSON'
+  return runtimeProtocols[index % runtimeProtocols.length]
+}
+
+const normalizeRuntimeData = (item = {}, index = 0) => {
+  const server = lanServers.find(s =>
+    s.id === item.serverId ||
+    s.ip === item.serverIp ||
+    serverLabel(s) === item.serverName ||
+    item.serverName?.includes(s.ip)
+  ) || lanServers[index % lanServers.length]
+  const serverId = item.serverId || server.id
+  const protocol = detectProtocol(item, index)
+  const sourceCode = item.sourceCode || item.telemetryCode || item.paramCode || item.code || `D${String(index + 1).padStart(3, '0')}`
+  const paramName = item.paramName || item.name || item.telemetryName || protocolRuntimeItems[protocol]?.[index % protocolRuntimeItems[protocol].length]?.name || '实时数据'
+  const value = item.paramValue ?? item.value ?? item.telemetryValue ?? (Math.random() * 90 + 10).toFixed(2)
+  return {
+    ...item,
+    id: item.id || `${serverId}-${protocol}-${sourceCode}-${index}`,
+    serverId,
+    serverIp: item.serverIp || server.ip,
+    serverName: item.serverName || serverLabel(server),
+    protocol,
+    channel: protocol,
+    satelliteId: item.satelliteId || item.serverName || serverLabel(server),
+    sourceCode,
+    telemetryCode: item.telemetryCode?.includes(`${serverId}-`) ? item.telemetryCode : `${serverId}-${protocol}-${sourceCode}`,
+    displayCode: sourceCode,
+    optionLabel: `${sourceCode} / ${paramName}`,
+    paramName,
+    paramType: item.paramType || protocolRuntimeItems[protocol]?.[index % protocolRuntimeItems[protocol].length]?.type || '状态',
+    paramValue: value,
+    status: item.status || '正常',
+    timestamp: item.timestamp || item.collectTime || new Date().toISOString(),
+  }
+}
+
+const latestTelemetryRows = (rows, limit = 24) =>
+  [...rows]
+    .sort((a, b) => getTimestamp(b) - getTimestamp(a))
+    .slice(0, limit)
+    .map(normalizeRuntimeData)
+
+let fallbackTelemetryCache = null
+const getFallbackTelemetryCache = () => {
+  if (!fallbackTelemetryCache) fallbackTelemetryCache = generateFallbackTelemetryCache()
+  return fallbackTelemetryCache
+}
+
+const defaultParamNames = ['实验调度信息', '卫星遥测帧', '实验实施方案', '目标位置数据']
+const pickDefaultParams = () => {
+  const rows = vizTelemetryCache.value.length ? vizTelemetryCache.value : getFallbackTelemetryCache()
+  const uniqueByCode = new Map()
+  rows.forEach(item => {
+    const key = item.telemetryCode || item.paramCode || item.paramName
+    if (key && !uniqueByCode.has(key)) uniqueByCode.set(key, item)
+  })
+  const preferred = defaultParamNames
+    .map(name => Array.from(uniqueByCode.values()).find(item => item.paramName === name))
+    .filter(Boolean)
+  const fallback = Array.from(uniqueByCode.values()).slice(0, 4)
+  return (preferred.length ? preferred : fallback).slice(0, 4).map(item => item.telemetryCode || item.paramCode || item.paramName)
+}
+
+const paramDisplayName = (key) => {
+  const info = findParamInfo(key)
+  return info ? `${info.protocol} ${info.paramName}` : key
+}
+
+const findParamInfo = (key) =>
+  vizTelemetryCache.value.find(d => d.telemetryCode === key || d.paramName === key || d.sourceCode === key) ||
+  getFallbackTelemetryCache().find(d => d.telemetryCode === key || d.paramName === key || d.sourceCode === key)
+
+const matchesParamKey = (item, key) => item.telemetryCode === key || item.paramName === key || item.sourceCode === key
+
+const protocolRuntimeItems = {
+  Protobuf: [
+    { code: 'PB001', name: '实验调度信息', type: '任务' },
+    { code: 'PB002', name: '任务过程数据', type: '状态' },
+    { code: 'PB003', name: '资源状态信息', type: '状态' },
+    { code: 'PB004', name: '告警事件流', type: '状态' },
+  ],
+  PDXP: [
+    { code: 'PX001', name: '卫星遥测帧', type: '遥测' },
+    { code: 'PX002', name: '目标位置数据', type: '态势' },
+    { code: 'PX003', name: '场景状态字', type: '态势' },
+    { code: 'PX004', name: '下行链路速率', type: '遥测' },
+  ],
+  JSON: [
+    { code: 'JS001', name: '实验实施方案', type: '任务' },
+    { code: 'JS002', name: '评估结果数据', type: '状态' },
+    { code: 'JS003', name: '接口健康状态', type: '状态' },
+    { code: 'JS004', name: '配置参数变更', type: '状态' },
+  ],
+}
+
+const generateFallbackTelemetryCache = () => {
+  const list = []
+  lanServers.forEach(server => {
+    runtimeProtocols.forEach(protocol => {
+      protocolRuntimeItems[protocol].forEach((item, itemIndex) => {
+        list.push(normalizeRuntimeData({
+          serverId: server.id,
+          serverIp: server.ip,
+          serverName: serverLabel(server),
+          protocol,
+          sourceCode: item.code,
+          telemetryCode: `${server.id}-${protocol}-${item.code}`,
+          displayCode: item.code,
+          optionLabel: `${item.code} / ${item.name}`,
+          paramName: item.name,
+          paramType: item.type,
+          paramValue: (Math.random() * 80 + 10).toFixed(2),
+          status: '正常',
+          timestamp: new Date(Date.now() - itemIndex * 1000).toISOString(),
+        }, list.length))
+      })
+    })
+  })
+  return list
+}
+
+const simValue = (info, t) => {
+  const seed = (info.telemetryCode || info.paramName || 'X').charCodeAt(0)
+  const baseMap = { '实验调度信息': 42, '任务过程数据': 65, '资源状态信息': 58, '告警事件流': 12, '卫星遥测帧': 78, '目标位置数据': 120, '场景状态字': 32, '下行链路速率': 150, '实验实施方案': 24, '评估结果数据': 88, '接口健康状态': 96, '配置参数变更': 18 }
+  const ampMap = { '实验调度信息': 8, '任务过程数据': 16, '资源状态信息': 12, '告警事件流': 6, '卫星遥测帧': 24, '目标位置数据': 36, '场景状态字': 10, '下行链路速率': 45, '实验实施方案': 7, '评估结果数据': 14, '接口健康状态': 3, '配置参数变更': 5 }
+  const b = baseMap[info.paramName] || 50
+  const a = ampMap[info.paramName] || 10
+  return +(b + Math.sin(t / 10000 + seed) * a + (Math.random() - 0.5) * a * 0.3).toFixed(2)
+}
+
+const generateInitialData = (widget) => {
+  if (widget.type !== 'chart') return
+  const now = Date.now()
+  widget.params.forEach((param) => {
+    const rows = vizTelemetryCache.value
+      .filter(item => matchesParamKey(item, param))
+      .sort((a, b) => getTimestamp(a) - getTimestamp(b))
+      .slice(-maxDataPoints)
+    const info = rows[rows.length - 1] || findParamInfo(param)
+    const points = rows.map(row => [getTimestamp(row), parseValue(row.paramValue)])
+    if (points.length === 0 && info) {
+      for (let i = maxDataPoints - 1; i >= 0; i--) {
+        const t = now - i * 1000
+        points.push([t, simValue(info, t)])
+      }
+    }
+    widget.dataMap[param] = points
+  })
+}
+
+const updateChartWidget = (widget) => {
+  const inst = chartInstances.get(widget.id)
+  if (!inst) return
+  const series = widget.params.map((param, index) => ({
+    name: paramDisplayName(param),
+    type: 'line',
+    smooth: false,
+    symbol: 'none',
+    data: widget.dataMap?.[param] || [],
+    itemStyle: { color: colors[index % colors.length] },
+    lineStyle: { width: 2 },
+  }))
+  inst.setOption({
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      valueFormatter: (value) => (typeof value === 'number' ? value.toFixed(2) : value),
+    },
+    legend: {
+      data: widget.params.map(paramDisplayName),
+      textStyle: { color: '#8ABBDB' },
+      top: 0,
+    },
+    grid: { left: '3%', right: '4%', bottom: '3%', top: 30, containLabel: true },
+    xAxis: {
+      type: 'time',
+      axisLabel: {
+        color: '#8ABBDB',
+        formatter: (value) => new Date(value).toLocaleTimeString('zh-CN', { hour12: false }),
+      },
+      axisLine: { lineStyle: { color: '#3a3a4a' } },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: 'value',
+      axisLabel: { color: '#8ABBDB' },
+      axisLine: { lineStyle: { color: '#3a3a4a' } },
+      splitLine: { lineStyle: { color: '#2a2a3a' } },
+    },
+    series,
+  }, true)
+}
+
+const makeTableRows = (params, now) => {
+  const source = vizTelemetryCache.value.length ? vizTelemetryCache.value : getFallbackTelemetryCache()
+  if (!params || params.length === 0) {
+    return latestTelemetryRows(source, 24).map((row, i) => ({ ...row, key: row.id || `${row.telemetryCode}-${i}` }))
+  }
+  const rows = params.map((param, paramIndex) => {
+    const info = findParamInfo(param)
+    if (!info) return null
+    const v = simValue(info, now)
+    return normalizeRuntimeData({
+      ...info,
+      id: `${param}-${now}`,
+      paramType: info.paramType || '状态',
+      paramName: info.paramName || param,
+      telemetryCode: info.telemetryCode || param,
+      paramValue: v.toFixed(2),
+      status: Math.random() > 0.92 ? '异常' : '正常',
+    }, paramIndex)
+  }).filter(Boolean)
+  return rows.map((r, i) => ({ ...r, key: r.id || `${r.telemetryCode}-${i}` }))
+}
+
+const hasActiveDataWidgets = () =>
+  widgets.value.some(w => (w.type === 'chart' || w.type === 'table') && w.params && w.params.length > 0)
+
+const syncSimulationTimer = () => {
+  if (hasActiveDataWidgets()) {
+    if (!simTimer) simTimer = setInterval(simulateTick, 1000)
+  } else if (simTimer) {
+    clearInterval(simTimer)
+    simTimer = null
+  }
+}
+
+const simulateTick = () => {
+  const now = Date.now()
+  widgets.value.forEach(widget => {
+    if (widget.type === 'chart') {
+      widget.params.forEach((param) => {
+        const info = findParamInfo(param)
+        if (!info) return
+        const v = simValue(info, now)
+        if (!widget.dataMap[param]) widget.dataMap[param] = []
+        widget.dataMap[param].push([now, v])
+        if (widget.dataMap[param].length > maxDataPoints) widget.dataMap[param].shift()
+      })
+      updateChartWidget(widget)
+    } else if (widget.type === 'table') {
+      widget.rows = makeTableRows(widget.params, now)
+    }
+  })
+}
+
+const loadTelemetryCache = async () => {
+  try {
+    const res = await telemetryApi.getRecent(500)
+    const data = res.data || []
+    vizTelemetryCache.value = data.length > 0
+      ? data.map((item, index) => normalizeRuntimeData(item, index))
+      : getFallbackTelemetryCache()
+  } catch (e) {
+    console.error('loadTelemetryCache error:', e)
+    vizTelemetryCache.value = getFallbackTelemetryCache()
+  }
+  const validParamSet = new Set(vizTelemetryCache.value.map(item => item.telemetryCode))
+  const defaultParams = pickDefaultParams()
+  // Initialize default params for widgets that have none, and migrate stale saved params.
+  widgets.value.forEach(widget => {
+    if (widget.type === 'chart' || widget.type === 'table') {
+      widget.params = (widget.params || []).filter(param => validParamSet.has(param))
+      if (widget.params.length === 0) widget.params = [...defaultParams]
+      if (widget.type === 'chart') {
+        widget.dataMap = {}
+        generateInitialData(widget)
+        nextTick(() => updateChartWidget(widget))
+      } else if (widget.type === 'table') {
+        widget.rows = makeTableRows(widget.params, Date.now())
+      }
+    }
+  })
+  saveLayout()
+  syncSimulationTimer()
+}
+
+const loadExperimentTasks = async () => {
+  try {
+    const res = await processTaskApi.getAll()
+    tasks.value = res.data || []
+  } catch (e) {
+    if (e.code === 'ERR_CANCELED' || e.message?.includes('aborted')) return
+    console.error(e)
+  }
+}
+
+const loadFallbackAlarms = () => {
+  const now = Date.now()
+  alarms.value = [
+    { id: 'fb-1', paramName: '温度', currentValue: 72.5, thresholdValue: 70, thresholdType: 'UPPER', unit: '°C', alarmTime: new Date(now - 2000).toISOString() },
+    { id: 'fb-2', paramName: '母线电压', currentValue: 21.3, thresholdValue: 22, thresholdType: 'LOWER', unit: 'V', alarmTime: new Date(now - 6000).toISOString() },
+    { id: 'fb-3', paramName: '存储容量', currentValue: 92.1, thresholdValue: 90, thresholdType: 'UPPER', unit: '%', alarmTime: new Date(now - 9000).toISOString() },
+  ]
+}
+
+const normalizeAlarm = (payload) => {
+  const ts = payload.timestampMs || payload.timestamp || payload.time || Date.now()
+  const paramName = payload.paramName || payload.paramCode || payload.source || '遥测参数'
+  const currentValue = parseValue(payload.currentValue ?? payload.value ?? payload.paramValue)
+  const thresholdValue = parseValue(payload.thresholdValue ?? payload.threshold ?? payload.upperLimit ?? payload.lowerLimit)
+  const thresholdType = normalizeThresholdType(payload.thresholdType || payload.direction || payload.comparison, currentValue, thresholdValue)
+  return {
+    id: payload.id || `${paramName}-${ts}-${Math.random().toString(16).slice(2)}`,
+    alarmTime: payload.alarmTime || payload.timestamp || payload.time || new Date(ts).toISOString(),
+    paramName,
+    currentValue,
+    thresholdValue,
+    thresholdType,
+    unit: payload.unit || '',
+    level: payload.level || payload.severity || 'WARNING',
+  }
+}
+
+const normalizeThresholdType = (raw, currentValue, thresholdValue) => {
+  const value = String(raw || '').toUpperCase()
+  if (value.includes('LOW') || value.includes('BELOW') || value.includes('LT') || value.includes('DOWN') || value.includes('下限')) return 'LOWER'
+  if (value.includes('UP') || value.includes('HIGH') || value.includes('GT') || value.includes('OVER') || value.includes('上限')) return 'UPPER'
+  return Number(currentValue) < Number(thresholdValue) ? 'LOWER' : 'UPPER'
+}
+
+const alarmDirectionIcon = (type) => type === 'LOWER' ? '↓' : '↑'
+const alarmDirectionClass = (type) => type === 'LOWER' ? 'alarm-lower' : 'alarm-upper'
+
+const formatAlarmValue = (value, unit = '') => {
+  const num = Number(value)
+  const text = Number.isFinite(num) ? num.toFixed(2).replace(/\.00$/, '') : '-'
+  return `${text}${unit || ''}`
+}
+
+const formatAlarmTime = (value) => {
+  const date = value ? new Date(value) : new Date()
+  if (Number.isNaN(date.getTime())) return '-'
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+const loadRecentAlarms = async () => {
+  try {
+    const res = await alarmApi.getList(20)
+    const rows = (res.data || []).map(normalizeAlarm)
+    if (rows.length > 0) {
+      alarms.value = rows.slice(0, 12)
+      return
+    }
+  } catch (e) {
+    if (e.code === 'ERR_CANCELED' || e.message?.includes('aborted')) return
+    console.warn('[alarm] 加载最近告警失败，使用演示告警', e)
+  }
+  loadFallbackAlarms()
+}
+
+const wsBaseUrl = () => {
+  const base = getRuntimeConfig().apiBaseUrl || '/api'
+  if (/^https?:\/\//.test(base)) {
+    const url = new URL(base)
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    url.pathname = '/ws/alarm'
+    url.search = ''
+    return url.toString()
+  }
+  if (import.meta.env.DEV && base === '/api') return 'ws://localhost:8082/ws/alarm'
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${protocol}//${window.location.host}/ws/alarm`
+}
+
+const connectAlarmSocket = () => {
+  if (isMockEnabled() || typeof WebSocket === 'undefined') return
+  try {
+    alarmSocket = new WebSocket(wsBaseUrl())
+    alarmSocket.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data)
+        const incoming = Array.isArray(payload) ? payload : [payload]
+        alarms.value = [...incoming.map(normalizeAlarm), ...alarms.value].slice(0, 8)
+      } catch (e) {
+        console.warn('[alarm-ws] 无法解析告警消息', e)
+      }
+    }
+    alarmSocket.onerror = () => {
+      if (alarms.value.length === 0) loadFallbackAlarms()
+    }
+  } catch (e) {
+    console.warn('[alarm-ws] 连接失败，使用演示告警', e)
+  }
+}
+
+const onWindowResize = () => {
+  recomputeColWidth()
+  chartInstances.forEach(inst => inst.resize())
+}
+
+onMounted(async () => {
+  await nextTick()
+  recomputeColWidth()
+  if (typeof ResizeObserver !== 'undefined' && gridRef.value) {
+    resizeObserver = new ResizeObserver(() => {
+      recomputeColWidth()
+      chartInstances.forEach(inst => inst.resize())
+    })
+    resizeObserver.observe(gridRef.value)
+  }
+  window.addEventListener('resize', onWindowResize)
+
+  loadTelemetryCache()
+  loadExperimentTasks()
+  loadRecentAlarms()
+  connectAlarmSocket()
+  alarmTimer = setInterval(() => {
+    if (alarms.value.length === 0 || isMockEnabled()) loadRecentAlarms()
+  }, 3000)
+})
+
+onUnmounted(() => {
+  if (simTimer) clearInterval(simTimer)
+  if (alarmTimer) clearInterval(alarmTimer)
+  if (alarmSocket) alarmSocket.close()
+  if (resizeObserver) resizeObserver.disconnect()
+  window.removeEventListener('resize', onWindowResize)
+  chartInstances.forEach(inst => inst.dispose())
+  chartInstances.clear()
+})
+</script>
+
+<style scoped>
+.enhanced-viz {
+  padding: 16px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg-elevated);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ui-text) 8%, transparent);
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.toolbar-label {
+  flex: none;
+  color: var(--ui-text-muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.task-filter-select {
+  width: min(320px, 100%);
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.toolbar-btn {
+  min-height: 30px;
+  padding: 4px 14px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg-elevated);
+  color: var(--ui-text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.toolbar-btn:hover {
+  color: var(--ui-primary);
+  border-color: var(--ui-primary);
+}
+
+.toolbar-btn-primary {
+  border-color: var(--ui-primary);
+  background: var(--ui-primary);
+  color: var(--ui-bg-elevated);
+}
+
+.toolbar-btn-primary:hover {
+  background: color-mix(in srgb, var(--ui-primary) 88%, black);
+  color: var(--ui-bg-elevated);
+}
+
+.grid-container {
+  position: relative;
+  width: 100%;
+  min-height: 560px;
+}
+
+.grid-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--ui-primary) 18%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--ui-primary) 18%, transparent) 1px, transparent 1px);
+}
+
+.widget {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  background: var(--block-bg);
+  border-radius: var(--ui-radius);
+  box-shadow: 0 0 0 1px var(--block-ring), var(--block-shadow);
+  transition: box-shadow 0.15s ease;
+}
+
+.widget-active {
+  z-index: 2;
+  box-shadow: 0 0 0 2px var(--ui-primary), 0 12px 28px rgba(0, 0, 0, 0.18);
+}
+
+.widget:focus-within {
+  z-index: 3;
+}
+
+.widget-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ui-border-muted);
+  cursor: move;
+  user-select: none;
+}
+
+.widget-title {
+  flex: none;
+  color: var(--ui-text-highlighted);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.widget-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  justify-content: flex-end;
+  cursor: default;
+}
+
+.widget-param-select {
+  width: min(280px, 70%);
+}
+
+.widget-close {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ui-text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.widget-close:hover {
+  background: color-mix(in srgb, var(--ui-error) 18%, transparent);
+  color: var(--ui-error);
+}
+
+.widget-body {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.widget-chart {
+  width: 100%;
+  height: 100%;
+}
+
+.widget-scroll {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  padding: 0 4px;
+}
+
+.widget-image {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--ui-text-muted);
+  background: color-mix(in srgb, var(--ui-bg-muted) 60%, transparent);
+}
+
+.placeholder-icon {
+  font-size: 36px;
+  margin-bottom: 8px;
+}
+
+.widget-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg, transparent 50%, var(--ui-border) 50%, var(--ui-border) 60%, transparent 60%, transparent 75%, var(--ui-border) 75%, var(--ui-border) 85%, transparent 85%);
+  border-bottom-right-radius: var(--ui-radius);
+}
+
+.widget-resize:hover {
+  background:
+    linear-gradient(135deg, transparent 50%, var(--ui-primary) 50%, var(--ui-primary) 60%, transparent 60%, transparent 75%, var(--ui-primary) 75%, var(--ui-primary) 85%, transparent 85%);
+}
+
+.alarm-time {
+  color: var(--ui-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.alarm-current-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.alarm-current-value.alarm-upper,
+.alarm-current-value.alarm-lower {
+  color: #EF443C;
+}
+
+.alarm-direction {
+  display: inline-block;
+  width: 12px;
+  font-size: 14px;
+  line-height: 1;
+  text-align: center;
+}
+</style>
