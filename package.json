@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "scripts": {
+    "build": "cd frontend && PUPPETEER_SKIP_DOWNLOAD=1 npm ci && npm run build",
+    "preview": "cd frontend && npm run preview"
+  }
+}
