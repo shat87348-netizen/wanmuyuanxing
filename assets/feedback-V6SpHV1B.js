@@ -1,0 +1,1 @@
+const s=(e,o)=>{const n={type:e,text:String(o||"")};typeof window<"u"?window.dispatchEvent(new CustomEvent("sjcl:toast",{detail:n})):e==="error"&&console.error(n.text)},t={success(e){s("success",e)},error(e){s("error",e)},warning(e){s("warning",e)},info(e){s("info",e)}};export{t as m};

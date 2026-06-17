@@ -1,0 +1,4 @@
+{
+  "useMock": true,
+  "apiBaseUrl": "/api"
+}
