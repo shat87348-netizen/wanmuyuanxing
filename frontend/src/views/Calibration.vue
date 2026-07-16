@@ -1,7 +1,7 @@
 <template>
   <div class="calibration">
     <UiRow :gutter="16" class="stats-row">
-      <UiCol :xs="24" :sm="12" :md="6">
+      <UiCol :xs="24" :sm="12" :md="8">
         <UiCard class="stat-card">
           <UiStatistic title="今日校准数据" :value="stats.calibrated" :value-style="{ color: '#45AD8D' }">
             <template #prefix><CheckCircleOutlined /></template>
@@ -9,24 +9,17 @@
           </UiStatistic>
         </UiCard>
       </UiCol>
-      <UiCol :xs="24" :sm="12" :md="6">
+      <UiCol :xs="24" :sm="12" :md="8">
         <UiCard class="stat-card">
           <UiStatistic title="检测野值" :value="stats.outliers" :value-style="{ color: '#EF443C' }">
             <template #prefix><WarningOutlined /></template>
           </UiStatistic>
         </UiCard>
       </UiCol>
-      <UiCol :xs="24" :sm="12" :md="6">
+      <UiCol :xs="24" :sm="12" :md="8">
         <UiCard class="stat-card">
           <UiStatistic title="清洗数据" :value="stats.cleaned" :value-style="{ color: '#ECBE84' }">
             <template #prefix><DeleteOutlined /></template>
-          </UiStatistic>
-        </UiCard>
-      </UiCol>
-      <UiCol :xs="24" :sm="12" :md="6">
-        <UiCard class="stat-card">
-          <UiStatistic title="数据准确率" :value="accuracy" suffix="%" :value-style="{ color: '#8ABBDB' }">
-            <template #prefix><CheckCircleOutlined /></template>
           </UiStatistic>
         </UiCard>
       </UiCol>
@@ -40,6 +33,9 @@
           </template>
           <UiTable :columns="channelColumns" :data-source="channels" :loading="loading" row-key="id" size="small">
             <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'formula'">
+                <span class="cal-formula">{{ getFormula(record.channelType) }}</span>
+              </template>
               <template v-if="column.key === 'algorithm'">
                 <UiTag>{{ getMethodName(record.outlierMethod) }}</UiTag>
               </template>
@@ -85,11 +81,6 @@
             :locale="{ emptyText: '暂无数据' }"
           >
             <template #bodyCell="{ column, record }">
-              <template v-if="column.key === 'accuracy'">
-                <span :style="{ color: record.accuracy >= 95 ? '#45AD8D' : record.accuracy >= 80 ? '#ECBE84' : '#EF443C' }">
-                  {{ record.accuracy }}%
-                </span>
-              </template>
               <template v-if="column.key === 'action'">
                 <UiButton type="link" size="small" @click="viewLogDetail(record)">详情</UiButton>
               </template>
@@ -118,7 +109,7 @@
             </UiFormItem>
           </UiCol>
           <UiCol :span="12">
-            <UiFormItem label="通道类型" required>
+            <UiFormItem label="数据类型" required>
               <UiSelect v-model:value="channelForm.channelType" placeholder="请选择类型">
                 <UiSelectOption value="温度传感器">温度传感器</UiSelectOption>
                 <UiSelectOption value="电压传感器">电压传感器</UiSelectOption>
@@ -144,18 +135,9 @@
 
         <!-- 阈值法配置 -->
         <template v-if="channelForm.outlierMethod === 'threshold'">
-          <UiRow :gutter="16">
-            <UiCol :span="12">
-              <UiFormItem label="上限阈值">
-                <UiInputNumber v-model:value="channelForm.upperThreshold" :min="0" style="width: 100%" />
-              </UiFormItem>
-            </UiCol>
-            <UiCol :span="12">
-              <UiFormItem label="下限阈值">
-                <UiInputNumber v-model:value="channelForm.lowerThreshold" :min="0" style="width: 100%" />
-              </UiFormItem>
-            </UiCol>
-          </UiRow>
+          <UiFormItem label="阈值百分比 (%)">
+            <UiInputNumber v-model:value="channelForm.thresholdPercent" :min="0" :max="100" style="width: 100%" />
+          </UiFormItem>
         </template>
 
         <!-- 莱特准则配置 -->
@@ -236,8 +218,7 @@ const channelForm = reactive({
   range: '',
   // 算法配置
   outlierMethod: 'threshold',
-  upperThreshold: 100,
-  lowerThreshold: 0,
+  thresholdPercent: 10,
   sigmaMultiplier: 3,
   sampleWindow: 100,
   dynamicUpdate: true,
@@ -256,19 +237,28 @@ const stats = ref({
   channels: 0
 })
 
-const accuracy = ref(98.5)
-
 const channels = ref([])
 const calibrationLogs = ref([])
 
 const channelColumns = [
   { title: '通道名称', dataIndex: 'channelName' },
+  { title: '公式', key: 'formula', width: 100 },
   { title: '类型', dataIndex: 'channelType' },
   { title: '范围', dataIndex: 'range' },
   { title: '算法', key: 'algorithm', width: 100 },
   { title: '状态', key: 'status' },
   { title: '操作', key: 'action', width: 150 }
 ]
+
+// 校准通道类型 → 公式类型编号（取值风格参考数据处理·参数解析配置的“公式类型”列）
+const typeFormulaMap = {
+  温度传感器: '109',
+  电压传感器: '109',
+  电流传感器: '100',
+  功率传感器: '114',
+  姿态传感器: '106'
+}
+const getFormula = (channelType) => typeFormulaMap[channelType] || '-'
 
 const getMethodName = (method) => {
   const map = { 'threshold': '阈值法', '3sigma': '莱特准则', 'chauvener': '肖维涅法' }
@@ -277,10 +267,9 @@ const getMethodName = (method) => {
 
 const logColumns = [
   { title: '日期', dataIndex: 'date', width: 110 },
-  { title: '通道', dataIndex: 'channelName' },
+  { title: '数据', dataIndex: 'channelName' },
   { title: '检出野值', dataIndex: 'outlierCount', width: 88 },
   { title: '清洗数量', dataIndex: 'cleanedCount', width: 88 },
-  { title: '准确率', key: 'accuracy', width: 82 },
   { title: '操作', key: 'action', width: 64 }
 ]
 
@@ -473,12 +462,7 @@ const loadStats = async () => {
     stats.value.calibrated = calibratedStats.data?.todayCalibrated || 0
     stats.value.outliers = calibratedStats.data?.todayOutliers || 0
     stats.value.cleaned = calibratedStats.data?.todayCleaned || 0
-
-    // 计算准确率
-    if (stats.value.calibrated > 0) {
-      accuracy.value = parseFloat(((stats.value.calibrated - stats.value.outliers) / stats.value.calibrated * 100).toFixed(1))
-    }
-  } catch (e) { 
+  } catch (e) {
     if (e.code === 'ERR_CANCELED' || e.message?.includes('aborted')) return
     console.error(e) 
   }
@@ -552,8 +536,7 @@ const editChannel = (record) => {
   channelForm.range = record.range
   // 算法配置
   channelForm.outlierMethod = record.outlierMethod || 'threshold'
-  channelForm.upperThreshold = record.upperThreshold ?? 100
-  channelForm.lowerThreshold = record.lowerThreshold ?? 0
+  channelForm.thresholdPercent = record.thresholdPercent ?? 10
   channelForm.sigmaMultiplier = record.sigmaMultiplier ?? 3
   channelForm.sampleWindow = record.sampleWindow ?? 100
   channelForm.dynamicUpdate = record.dynamicUpdate !== false
@@ -618,6 +601,12 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.05) !important;
   border: 1px solid rgba(255,255,255,0.15) !important;
   border-radius: 4px !important;
+}
+
+.cal-formula {
+  color: var(--ui-text-highlighted);
+  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+  font-size: 13px;
 }
 
 .cal-chart-toolbar {

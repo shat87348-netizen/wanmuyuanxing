@@ -29,6 +29,7 @@
           <UiStatistic title="处理错误" :value="stats.errors" :value-style="{ color: '#EF443C' }">
             <template #prefix><CloseCircleOutlined /></template>
           </UiStatistic>
+          <div class="device-error-hint">来自采集设备上报，共 {{ deviceErrorRows.length }} 台设备</div>
         </UiCard>
       </UiCol>
     </UiRow>
@@ -117,7 +118,9 @@
             >
               <template #bodyCell="{ column, record }">
                 <template v-if="column.key === 'timestamp'">{{ formatTime(record.timestamp) || '-' }}</template>
-                <template v-if="column.key === 'value'"><span class="param-value">{{ record.value }}</span></template>
+                <template v-if="column.key === 'frame'">
+                  <span class="frame-preview" @click="openFrameView(record)">{{ record.framePreview }}</span>
+                </template>
               </template>
             </UiTable>
           </UiCard>
@@ -151,9 +154,11 @@
             >
               <template #bodyCell="{ column, record }">
                 <template v-if="column.key === 'timestamp'">{{ formatTime(record.timestamp) || '-' }}</template>
-                <template v-if="column.key === 'value'"><span class="param-value">{{ record.value }}</span></template>
                 <template v-if="column.key === 'frameCheck'">
                   <UiTag color="error">{{ getFrameCheckText(record.frameCheck) }}</UiTag>
+                </template>
+                <template v-if="column.key === 'frame'">
+                  <span class="frame-preview" @click="openFrameView(record)">{{ record.framePreview }}</span>
                 </template>
               </template>
             </UiTable>
@@ -171,7 +176,7 @@
               <template #bodyCell="{ column, record }">
                 <template v-if="column.key === 'logTime'">{{ formatTime(record.logTime) || '-' }}</template>
                 <template v-if="column.key === 'level'">
-                  <UiTag :color="getLogColor(record.level)">{{ record.level || '-' }}</UiTag>
+                  <UiTag :color="getLogColor(record.level)">{{ getLogLevelText(record.level) }}</UiTag>
                 </template>
                 <template v-if="column.key === 'message'">
                   <span class="realtime-table-message">{{ record.message }}</span>
@@ -185,7 +190,22 @@
       <UiTabPane key="processed" tab="处理后数据（待确认）">
         <UiCard title="处理后遥测数据" class="data-card">
           <template #extra>
-            <UiButton size="small" @click="loadProcessedData">刷新</UiButton>
+            <div class="processed-extra">
+              <div class="column-picker" ref="columnPickerRef">
+                <UiButton size="small" @click.stop="columnPickerOpen = !columnPickerOpen">列设置 ▾</UiButton>
+                <div v-if="columnPickerOpen" class="column-picker-panel">
+                  <label v-for="col in processedColumnDefs" :key="col.key" class="column-picker-item">
+                    <input
+                      type="checkbox"
+                      :checked="visibleProcessedColumnKeys.includes(col.key)"
+                      @change="toggleColumnVisible(col.key)"
+                    />
+                    <span>{{ col.title }}</span>
+                  </label>
+                </div>
+              </div>
+              <UiButton size="small" @click="loadProcessedData">刷新</UiButton>
+            </div>
           </template>
           <UiTable :columns="processedColumns" :data-source="processedData" :loading="processedLoading" row-key="id" size="small" :pagination="{ pageSize: 15 }">
             <template #bodyCell="{ column, record }">
@@ -268,9 +288,9 @@
             </UiCard>
 
             <UiCard title="查询结果" class="data-card query-result-card">
-              <UiTabs v-model:activeKey="queryResultView" @change="handleResultViewChange">
+              <UiTabs v-model:activeKey="queryResultView">
                 <UiTabPane key="curve" tab="曲线">
-                  <div ref="paramQueryChartRef" class="param-query-chart"></div>
+                  <TelemetryLineChart :series="paramQuerySeries" class="param-query-chart" />
                 </UiTabPane>
                 <UiTabPane key="table" tab="表格">
                   <UiTable
@@ -300,9 +320,27 @@
       <UiTabPane key="paramConfig" tab="参数解析配置（待确认）">
         <UiCard title="遥测参数解析配置" class="data-card">
           <template #extra>
-            <UiButton type="primary" size="small" @click="openParamModal()">添加参数</UiButton>
+            <UiSpace>
+              <UiButton size="small" @click="triggerParamConfigImport">上传配置</UiButton>
+              <UiButton type="primary" size="small" @click="openParamModal()">添加参数</UiButton>
+            </UiSpace>
           </template>
-          <UiTable :columns="paramConfigColumns" :data-source="paramConfigs" :loading="paramLoading" row-key="id" size="small" :pagination="{ pageSize: 10 }" :scroll="{ x: 2200 }">
+          <div class="param-config-satellite-filter">
+            <label>卫星</label>
+            <UiSelect v-model:value="selectedConfigSatellite" placeholder="请选择卫星" style="width: 220px">
+              <UiSelectOption v-for="sat in satelliteOptions" :key="sat" :value="sat">{{ sat }}</UiSelectOption>
+            </UiSelect>
+          </div>
+          <UiTable
+            :columns="paramConfigColumns"
+            :data-source="filteredParamConfigs"
+            :loading="paramLoading"
+            row-key="id"
+            size="small"
+            :pagination="{ pageSize: 10 }"
+            :scroll="{ x: 2200 }"
+            :locale="{ emptyText: selectedConfigSatellite ? '该卫星暂无参数配置' : '请先选择卫星' }"
+          >
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'statusInfo'">
                 <span class="config-status-text">{{ record.statusInfo || '-' }}</span>
@@ -360,6 +398,9 @@
                 <UiSelectOption value="是">是</UiSelectOption>
                 <UiSelectOption value="否">否</UiSelectOption>
               </UiSelect>
+              <UiSelect v-else-if="field.type === 'satellite'" v-model:value="paramForm[field.key]" placeholder="请选择卫星">
+                <UiSelectOption v-for="sat in satelliteOptions" :key="sat" :value="sat">{{ sat }}</UiSelectOption>
+              </UiSelect>
               <UiTextarea
                 v-else-if="field.type === 'textarea'"
                 v-model:value="paramForm[field.key]"
@@ -376,15 +417,27 @@
         </UiRow>
       </UiForm>
     </UiModal>
+
+    <!-- 原始帧(256字节)查看弹窗 -->
+    <UiModal :visible="frameViewVisible" title="原始帧数据（256 字节）" @cancel="frameViewVisible = false" :footer="null" width="760px">
+      <div v-if="frameViewRecord" class="frame-view-meta">
+        <span>卫星：{{ frameViewRecord.satelliteId }}</span>
+        <span>遥测代号：{{ frameViewRecord.telemetryCode }}</span>
+        <span>时间：{{ formatTime(frameViewRecord.timestamp) || '-' }}</span>
+      </div>
+      <pre class="frame-hex-dump">{{ frameHexDump }}</pre>
+    </UiModal>
+
+    <input ref="paramConfigFileInputRef" type="file" accept=".csv" style="display:none" @change="onParamConfigFileChange" />
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import * as echarts from 'echarts'
 import { message } from '../utils/feedback'
-import { processTaskApi, processRuleApi, processLogApi, processedTelemetryApi, telemetryApi } from '../api'
+import { processTaskApi, processRuleApi, processLogApi, processedTelemetryApi, telemetryApi, agentApi } from '../api'
 import ParamTreeSelect from '../components/ParamTreeSelect.vue'
+import TelemetryLineChart from '../components/TelemetryLineChart.vue'
 
 const mainTab = ref('task')
 const loading = ref(false)
@@ -395,7 +448,6 @@ const newTaskVisible = ref(false)
 let refreshInterval = null
 let realtimeMockInterval = null
 let realtimeMockSeq = 0
-let paramQueryChart = null
 
 const newTask = reactive({
   taskName: '',
@@ -409,6 +461,33 @@ const stats = ref({
   deduped: 0,
   errors: 0
 })
+
+// 处理错误：软件层暂无法统计，改为汇总采集设备(Agent)上报的接口错误数
+const deviceErrorRows = ref([])
+
+const loadDeviceErrors = async () => {
+  try {
+    const res = await agentApi.getAll()
+    const list = res.data || []
+    const rows = list
+      .map(agent => {
+        const instances = agent.instances || []
+        const errorCount = instances.reduce((sum, inst) => sum + (Number(inst.errorCount) || 0), 0)
+        return {
+          agentId: agent.agentId || agent.id || '-',
+          agentName: agent.agentName || agent.name || '',
+          host: agent.host || agent.ipAddress || agent.ip || '-',
+          errorCount
+        }
+      })
+      .filter(row => row.errorCount > 0)
+      .sort((a, b) => b.errorCount - a.errorCount)
+    deviceErrorRows.value = rows
+    stats.value.errors = rows.reduce((sum, row) => sum + row.errorCount, 0)
+  } catch (e) {
+    console.error(e)
+  }
+}
 
 const monitorStats = ref({
   rate: 0,
@@ -425,10 +504,26 @@ const processedData = ref([])
 // 遥测数据 state
 const telemetryStats = ref({ totalCount: 0, realtimeCount: 0 })
 const telemetryCache = ref([])
+// 数据实时监控四分屏用的是处理后的遥测数据，与下方"遥测数据"查询用的原始遥测分开
+const processedRealtimeCache = ref([])
 const paramQueryLoading = ref(false)
 const paramQueryResults = ref([])
 const queryResultView = ref('curve')
-const paramQueryChartRef = ref(null)
+
+const paramQuerySeries = computed(() => {
+  const grouped = new Map()
+  paramQueryResults.value.forEach(item => {
+    if (!item.timestamp || item.numericValue === null) return
+    if (!grouped.has(item.telemetryCode)) grouped.set(item.telemetryCode, [])
+    grouped.get(item.telemetryCode).push(item)
+  })
+  return Array.from(grouped.entries()).map(([code, items]) => ({
+    name: code,
+    data: items
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+      .map(item => [item.timestamp, item.numericValue])
+  }))
+})
 
 const paramQuery = reactive({
   satellite: '',
@@ -440,15 +535,43 @@ const paramQuery = reactive({
   frameCheck: ''
 })
 
+// 原始帧(256字节)查看 state
+const frameViewVisible = ref(false)
+const frameViewRecord = ref(null)
+
+const openFrameView = (record) => {
+  frameViewRecord.value = record
+  frameViewVisible.value = true
+}
+
+const frameHexDump = computed(() => {
+  const bytes = frameViewRecord.value?.frameBytes
+  if (!bytes) return ''
+  const hex = toHexPairs(bytes)
+  const lines = []
+  for (let offset = 0; offset < hex.length; offset += 16) {
+    const chunk = hex.slice(offset, offset + 16)
+    lines.push(`${offset.toString(16).padStart(4, '0').toUpperCase()}  ${chunk.join(' ')}`)
+  }
+  return lines.join('\n')
+})
+
 // 参数解析配置 state
 const paramConfigs = ref([])
 const paramLoading = ref(false)
 const paramModalVisible = ref(false)
 const paramSubmitLoading = ref(false)
+const selectedConfigSatellite = ref('')
+const filteredParamConfigs = computed(() =>
+  selectedConfigSatellite.value
+    ? paramConfigs.value.filter(item => item.satelliteId === selectedConfigSatellite.value)
+    : []
+)
 const isEditingParam = ref(false)
 
 const createEmptyParamForm = () => ({
   id: null,
+  satelliteId: selectedConfigSatellite.value || '',
   sequence: null,
   bitWidth: 32,
   telemetryName: '',
@@ -472,6 +595,7 @@ const createEmptyParamForm = () => ({
 const paramForm = reactive(createEmptyParamForm())
 
 const paramConfigFormFields = [
+  { label: '卫星', key: 'satelliteId', type: 'satellite', required: true },
   { label: '序号', key: 'sequence', type: 'number', min: 1, precision: 0 },
   { label: '位宽', key: 'bitWidth', type: 'number', min: 1, precision: 0 },
   { label: '遥测名称', key: 'telemetryName', required: true, placeholder: '如: 系统时间' },
@@ -494,6 +618,7 @@ const paramConfigFormFields = [
 
 // 计算阈值区间条各段宽度比例
 const paramConfigColumns = [
+  { title: '卫星', dataIndex: 'satelliteId', key: 'satelliteId', width: 90 },
   { title: '序号', dataIndex: 'sequence', key: 'sequence', width: 70 },
   { title: '位宽', dataIndex: 'bitWidth', key: 'bitWidth', width: 70 },
   { title: '遥测名称', dataIndex: 'telemetryName', key: 'telemetryName', width: 160 },
@@ -521,37 +646,37 @@ const loadParamConfigs = async () => {
   try {
     paramConfigs.value = [
       {
-        id: 1, sequence: 152, bitWidth: 32, telemetryName: '30V母线电压', telemetryCode: 'FKT001',
+        id: 1, satelliteId: 'SAT-001', sequence: 152, bitWidth: 32, telemetryName: '30V母线电压', telemetryCode: 'FKT001',
         formulaType: '109', formulaDescription: '', processParam: '', decimalPlaces: 2, paramCode: '0',
         normalValue: '', warningValue: '', statusInfo: '', relatedCommand: '', system: '发控台',
         controlChannel: '', mergeChannelCount: 0, delayChannel: '', storageTelemetry: ''
       },
       {
-        id: 2, sequence: 153, bitWidth: 32, telemetryName: '蓄电池A电压', telemetryCode: 'FKT002',
+        id: 2, satelliteId: 'SAT-001', sequence: 153, bitWidth: 32, telemetryName: '蓄电池A电压', telemetryCode: 'FKT002',
         formulaType: '109', formulaDescription: '', processParam: '', decimalPlaces: 2, paramCode: '0',
         normalValue: '', warningValue: '', statusInfo: '', relatedCommand: '', system: '发控台',
         controlChannel: '', mergeChannelCount: 0, delayChannel: '', storageTelemetry: ''
       },
       {
-        id: 3, sequence: 470, bitWidth: 32, telemetryName: '同步标识', telemetryCode: 'TMF001',
+        id: 3, satelliteId: 'SAT-002', sequence: 470, bitWidth: 32, telemetryName: '同步标识', telemetryCode: 'TMF001',
         formulaType: '106', formulaDescription: '', processParam: '', decimalPlaces: 2, paramCode: '0',
         normalValue: '', warningValue: '', statusInfo: '', relatedCommand: '', system: '帧头',
         controlChannel: '', mergeChannelCount: 0, delayChannel: '', storageTelemetry: ''
       },
       {
-        id: 4, sequence: 478, bitWidth: 48, telemetryName: '系统时间', telemetryCode: 'TMS8300',
+        id: 4, satelliteId: 'SAT-002', sequence: 478, bitWidth: 48, telemetryName: '系统时间', telemetryCode: 'TMS8300',
         formulaType: '114', formulaDescription: '', processParam: '2000/1/1/12/0/0/1/', decimalPlaces: 3, paramCode: '1',
         normalValue: '正确:[0,281474976710655]', warningValue: '', statusInfo: '', relatedCommand: '',
         system: 'S01综合电子分系统', controlChannel: '', mergeChannelCount: 0, delayChannel: '', storageTelemetry: ''
       },
       {
-        id: 5, sequence: 479, bitWidth: 8, telemetryName: '信道关口A机指令符合计数', telemetryCode: 'TMS0127',
+        id: 5, satelliteId: 'SAT-003', sequence: 479, bitWidth: 8, telemetryName: '信道关口A机指令符合计数', telemetryCode: 'TMS0127',
         formulaType: '100', formulaDescription: '', processParam: '1/0/', decimalPlaces: 0, paramCode: '1',
         normalValue: '正常:[0,255]', warningValue: '', statusInfo: '', relatedCommand: '',
         system: 'S01综合电子分系统\\管理单元', controlChannel: '', mergeChannelCount: 0, delayChannel: '', storageTelemetry: ''
       },
       {
-        id: 6, sequence: 482, bitWidth: 1, telemetryName: '信道关口A机遥控帧CRC效验状态', telemetryCode: 'TMS0130',
+        id: 6, satelliteId: 'SAT-004', sequence: 482, bitWidth: 1, telemetryName: '信道关口A机遥控帧CRC效验状态', telemetryCode: 'TMS0130',
         formulaType: '106', formulaDescription: '', processParam: '', decimalPlaces: 0, paramCode: '1',
         normalValue: '正确:[0,0]/错误:[1,1]', warningValue: '', statusInfo: '0 表示正确，1 表示错误',
         relatedCommand: '', system: 'S01综合电子分系统\\管理单元', controlChannel: '', mergeChannelCount: 0,
@@ -562,6 +687,96 @@ const loadParamConfigs = async () => {
     console.error(e)
   }
   finally { paramLoading.value = false }
+}
+
+const paramConfigFileInputRef = ref(null)
+const triggerParamConfigImport = () => paramConfigFileInputRef.value?.click()
+
+const paramConfigCsvFieldMap = {
+  '卫星': 'satelliteId',
+  '序号': 'sequence',
+  '位宽': 'bitWidth',
+  '遥测名称': 'telemetryName',
+  '遥测代号': 'telemetryCode',
+  '公式类型': 'formulaType',
+  '公式描述': 'formulaDescription',
+  '处理参数': 'processParam',
+  '小数位数': 'decimalPlaces',
+  '参数代号': 'paramCode',
+  '正常值': 'normalValue',
+  '预警值': 'warningValue',
+  '状态信息': 'statusInfo',
+  '相关指令': 'relatedCommand',
+  '所属系统': 'system',
+  '控制波道': 'controlChannel',
+  '合并处理波道数': 'mergeChannelCount',
+  '延时波道': 'delayChannel',
+  '存储遥测': 'storageTelemetry'
+}
+
+// 简单 CSV 行解析，支持双引号包裹的字段（含逗号/转义双引号）
+const parseCsvLine = (line) => {
+  const cells = []
+  let cur = ''
+  let inQuotes = false
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i]
+    if (inQuotes) {
+      if (char === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++ } else { inQuotes = false }
+      } else {
+        cur += char
+      }
+    } else if (char === '"') {
+      inQuotes = true
+    } else if (char === ',') {
+      cells.push(cur)
+      cur = ''
+    } else {
+      cur += char
+    }
+  }
+  cells.push(cur)
+  return cells
+}
+
+const onParamConfigFileChange = (event) => {
+  const file = event.target.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    try {
+      const lines = String(e.target.result).split(/\r\n|\n|\r/).filter(line => line.trim() !== '')
+      if (lines.length < 2) throw new Error('文件内容为空')
+      const headers = parseCsvLine(lines[0]).map(h => h.trim())
+      const hasSatelliteColumn = headers.includes('卫星')
+      if (!hasSatelliteColumn && !selectedConfigSatellite.value) {
+        throw new Error('请先在上方选择卫星，或在 CSV 中提供"卫星"列')
+      }
+      const rows = lines.slice(1).map((line, index) => {
+        const cells = parseCsvLine(line)
+        const row = { id: Date.now() + index, satelliteId: selectedConfigSatellite.value }
+        headers.forEach((header, colIndex) => {
+          const key = paramConfigCsvFieldMap[header]
+          if (key) row[key] = (cells[colIndex] ?? '').trim()
+        })
+        return row
+      })
+      // 按卫星合并：替换掉本次上传涉及到的卫星的原有配置，其余卫星的配置保留不动
+      const touchedSatellites = new Set(rows.map(row => row.satelliteId))
+      paramConfigs.value = [
+        ...paramConfigs.value.filter(item => !touchedSatellites.has(item.satelliteId)),
+        ...rows
+      ]
+      message.success(`已导入 ${rows.length} 条参数配置`)
+    } catch (err) {
+      console.error('参数配置导入失败', err)
+      message.error(err.message?.includes('卫星') ? err.message : '导入失败：文件格式不正确')
+    } finally {
+      event.target.value = ''
+    }
+  }
+  reader.readAsText(file, 'UTF-8')
 }
 
 const openParamModal = (record) => {
@@ -578,6 +793,10 @@ const openParamModal = (record) => {
 }
 
 const handleParamSubmit = async () => {
+  if (!paramForm.satelliteId) {
+    message.error('请选择卫星')
+    return
+  }
   if (!paramForm.telemetryName || !paramForm.telemetryCode) {
     message.error('请填写完整信息')
     return
@@ -618,7 +837,7 @@ const taskColumns = [
   { title: '操作', key: 'action', width: 150 }
 ]
 
-const processedColumns = [
+const processedColumnDefs = [
   { title: '卫星ID', key: 'satelliteId', width: 100 },
   { title: '参数', key: 'paramName', width: 100 },
   { title: '参数值', key: 'paramValue', width: 120 },
@@ -627,6 +846,29 @@ const processedColumns = [
   { title: '去重', key: 'deduplicated', width: 70 },
   { title: '处理时间', key: 'processTime', width: 150 }
 ]
+
+const visibleProcessedColumnKeys = ref(processedColumnDefs.map(col => col.key))
+const processedColumns = computed(() =>
+  processedColumnDefs.filter(col => visibleProcessedColumnKeys.value.includes(col.key))
+)
+
+const columnPickerOpen = ref(false)
+const columnPickerRef = ref(null)
+
+const toggleColumnVisible = (key) => {
+  if (visibleProcessedColumnKeys.value.includes(key)) {
+    if (visibleProcessedColumnKeys.value.length === 1) return
+    visibleProcessedColumnKeys.value = visibleProcessedColumnKeys.value.filter(k => k !== key)
+  } else {
+    visibleProcessedColumnKeys.value = [...visibleProcessedColumnKeys.value, key]
+  }
+}
+
+const onColumnPickerOutsideClick = (event) => {
+  if (columnPickerOpen.value && columnPickerRef.value && !columnPickerRef.value.contains(event.target)) {
+    columnPickerOpen.value = false
+  }
+}
 
 const paramQueryColumns = [
   { title: '遥测代号', dataIndex: 'telemetryCode', width: 160 },
@@ -638,16 +880,15 @@ const realtimeCompactColumns = [
   { title: '时间', key: 'timestamp', width: 132 },
   { title: '卫星', dataIndex: 'satelliteId', width: 68 },
   { title: '通道', dataIndex: 'channel', width: 58 },
-  { title: '参数', dataIndex: 'paramName', width: 72 },
-  { title: '值', key: 'value', width: 74 }
+  { title: '原始帧(256B)', key: 'frame', width: 220 }
 ]
 
 const frameErrorColumns = [
   { title: '时间', key: 'timestamp', width: 132 },
   { title: '卫星', dataIndex: 'satelliteId', width: 68 },
   { title: '遥测', dataIndex: 'telemetryCode', width: 76 },
-  { title: '值', key: 'value', width: 74 },
-  { title: '帧检', key: 'frameCheck', width: 62 }
+  { title: '帧检', key: 'frameCheck', width: 62 },
+  { title: '原始帧(256B)', key: 'frame', width: 220 }
 ]
 
 const monitorStatusColumns = [
@@ -670,7 +911,7 @@ const satelliteOptions = computed(() => uniqueValues(telemetryCache.value.map(it
 const channelOptions = computed(() => uniqueValues(telemetryCache.value.map(item => item.channel)).sort())
 
 const realtimeTelemetryRows = computed(() => {
-  return [...telemetryCache.value]
+  return [...processedRealtimeCache.value]
     .sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0))
     .slice(0, 60)
 })
@@ -748,14 +989,30 @@ const parameterSelectData = computed(() => {
   return Array.from(map.values())
 })
 
+const normalizeTaskStatus = (status) => {
+  const map = {
+    RUNNING: '运行中', ACTIVE: '运行中', 运行中: '运行中',
+    COMPLETED: '已完成', DONE: '已完成', 已完成: '已完成',
+    PENDING: '等待中', WAITING: '等待中', 等待中: '等待中',
+    STOPPED: '已停止', 已停止: '已停止',
+    FAILED: '失败', ERROR: '失败', 失败: '失败'
+  }
+  return map[String(status || '').toUpperCase()] || map[status] || status || '-'
+}
+
 const getStatusColor = (status) => {
-  const colors = { '运行中': 'processing', '已完成': 'success', '等待中': 'default', '失败': 'error' }
+  const colors = { '运行中': 'processing', '已完成': 'success', '等待中': 'default', '已停止': 'default', '失败': 'error' }
   return colors[status] || 'default'
 }
 
 const getLogColor = (level) => {
   const colors = { 'INFO': 'blue', 'WARN': 'orange', 'ERROR': 'red', 'DEBUG': 'gray' }
   return colors[level] || 'blue'
+}
+
+const getLogLevelText = (level) => {
+  const map = { INFO: '信息', WARN: '警告', WARNING: '警告', ERROR: '错误', DEBUG: '调试' }
+  return map[String(level || '').toUpperCase()] || level || '-'
 }
 
 const getParamColor = (param) => {
@@ -812,15 +1069,43 @@ const normalizeTimeMode = (item) => {
   return 'REALTIME'
 }
 
+const FRAME_BYTE_LENGTH = 256
+
+// 帧字节数据目前后端未下发，这里按遥测代号+时间戳做确定性生成，仅用于演示原始帧编码内容
+const hashSeed = (str) => {
+  let h = 0
+  for (let i = 0; i < str.length; i++) {
+    h = (h * 31 + str.charCodeAt(i)) >>> 0
+  }
+  return h || 1
+}
+
+const buildFrameBytes = (seedStr, length = FRAME_BYTE_LENGTH) => {
+  let state = hashSeed(seedStr)
+  const bytes = new Array(length)
+  for (let i = 0; i < length; i++) {
+    state = (state * 1103515245 + 12345) >>> 0
+    bytes[i] = (state >>> 16) % 256
+  }
+  return bytes
+}
+
+const toHexPairs = (bytes) => bytes.map(b => b.toString(16).padStart(2, '0').toUpperCase())
+
+const framePreviewText = (bytes, count = 8) =>
+  `${toHexPairs(bytes.slice(0, count)).join(' ')} …`
+
 const normalizeTelemetry = (item, index) => {
   const timestamp = valueFrom(item, ['timestamp', 'collectTime', 'processTime', 'time', 'createdAt'])
   const paramName = valueFrom(item, ['paramName', 'name', 'telemetryName']) || '-'
   const telemetryCode = valueFrom(item, ['telemetryCode', 'paramCode', 'code', 'tmCode']) || paramName
   const value = valueFrom(item, ['value', 'paramValue', 'telemetryValue']) ?? '-'
+  const id = valueFrom(item, ['id', 'key']) || `${telemetryCode}-${timestamp || index}-${index}`
+  const frameBytes = valueFrom(item, ['frameBytes']) || buildFrameBytes(`${id}`)
 
   return {
     raw: item,
-    id: valueFrom(item, ['id', 'key']) || `${telemetryCode}-${timestamp || index}-${index}`,
+    id,
     satelliteId: valueFrom(item, ['satelliteId', 'satellite_id']) || '-',
     channel: valueFrom(item, ['channel', 'channelName', 'sourceInterface', 'interfaceInstanceId', 'protocol']) || '-',
     paramName,
@@ -829,6 +1114,8 @@ const normalizeTelemetry = (item, index) => {
     value,
     numericValue: parseNumericValue(value),
     timeMode: normalizeTimeMode(item),
+    frameBytes,
+    framePreview: framePreviewText(frameBytes),
     frameCheck: normalizeFrameCheck(valueFrom(item, ['frameCheckResult', 'frameCheck', 'checkResult', 'frameStatus', 'status']))
   }
 }
@@ -932,102 +1219,20 @@ const stopRealtimeMockFeed = () => {
   realtimeMockInterval = null
 }
 
-const renderParamQueryChart = async () => {
-  if (queryResultView.value !== 'curve') return
-  await nextTick()
-  const chartEl = paramQueryChartRef.value || document.querySelector('.param-query-chart')
-  if (!chartEl) return
-
-  if (!paramQueryChart) {
-    paramQueryChart = echarts.init(chartEl)
-  }
-
-  const rootStyle = getComputedStyle(document.documentElement)
-  const textColor = rootStyle.getPropertyValue('--ui-text-muted').trim() || '#9ca3af'
-  const borderColor = rootStyle.getPropertyValue('--ui-border-muted').trim() || 'rgba(148, 163, 184, 0.25)'
-  const primaryColor = rootStyle.getPropertyValue('--ui-primary').trim() || '#38bdf8'
-  const grouped = paramQueryResults.value.reduce((map, item) => {
-    if (!map.has(item.telemetryCode)) map.set(item.telemetryCode, [])
-    map.get(item.telemetryCode).push(item)
-    return map
-  }, new Map())
-
-  const series = Array.from(grouped.entries()).map(([code, items], index) => ({
-    name: code,
-    type: 'line',
-    smooth: true,
-    showSymbol: false,
-    data: items
-      .filter(item => item.timestamp && item.numericValue !== null)
-      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-      .map(item => [item.timestamp, item.numericValue]),
-    lineStyle: {
-      width: 2,
-      color: index === 0 ? primaryColor : undefined
-    }
-  }))
-
-  paramQueryChart.setOption({
-    color: [primaryColor, '#45AD8D', '#ECBE84', '#EF443C', '#8b5cf6', '#06b6d4'],
-    title: {
-      text: paramQueryResults.value.length ? '' : '暂无查询结果',
-      left: 'center',
-      top: 'middle',
-      textStyle: { color: textColor, fontSize: 14, fontWeight: 500 }
-    },
-    tooltip: {
-      trigger: 'axis',
-      formatter: (params) => {
-        if (!params || params.length === 0) return ''
-        const d = new Date(params[0].value[0])
-        const pad = (n) => String(n).padStart(2, '0')
-        const time = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-        const lines = params.map(p => `${p.marker}${p.seriesName}: ${p.value[1]}`).join('<br/>')
-        return `${time}<br/>${lines}`
-      }
-    },
-    legend: { top: 4, textStyle: { color: textColor } },
-    grid: { left: 44, right: 22, top: 42, bottom: 56 },
-    xAxis: {
-      type: 'time',
-      axisLabel: {
-        color: textColor,
-        formatter: (value) => {
-          const d = new Date(value)
-          const pad = (n) => String(n).padStart(2, '0')
-          return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}\n${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-        }
-      },
-      axisLine: { lineStyle: { color: borderColor } },
-      splitLine: { lineStyle: { color: borderColor } }
-    },
-    yAxis: {
-      type: 'value',
-      axisLabel: { color: textColor },
-      axisLine: { lineStyle: { color: borderColor } },
-      splitLine: { lineStyle: { color: borderColor } }
-    },
-    dataZoom: [
-      { type: 'inside', xAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseMove: false, filterMode: 'none' },
-      { type: 'inside', yAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseMove: false, filterMode: 'none' }
-    ],
-    series
-  }, true)
-  paramQueryChart.resize()
-}
-
 const loadTelemetry = async () => {
   try {
-    const [dataRes, statsRes] = await Promise.all([
+    const [dataRes, statsRes, processedRes] = await Promise.all([
       telemetryApi.getRecent(500),
-      telemetryApi.getStats()
+      telemetryApi.getStats(),
+      processedTelemetryApi.getRecent(500)
     ])
     const telemetryList = dataRes.data || []
     telemetryCache.value = telemetryList.map(normalizeTelemetry)
     updateTelemetryStats(statsRes.data || {}, telemetryCache.value)
-  } catch (e) { 
+    processedRealtimeCache.value = (processedRes.data || []).map(normalizeTelemetry)
+  } catch (e) {
     if (e.code === 'ERR_CANCELED' || e.message?.includes('aborted')) return
-    console.error(e) 
+    console.error(e)
   }
 }
 
@@ -1049,7 +1254,6 @@ const queryTelemetryParams = async () => {
       .filter(matchesParamQuery)
       .sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0))
     if (rows.length > 0) telemetryCache.value = rows
-    await renderParamQueryChart()
   } catch (e) {
     console.error(e)
     message.error('查询失败')
@@ -1069,14 +1273,10 @@ const resetParamQuery = () => {
   queryTelemetryParams()
 }
 
-const handleResultViewChange = () => {
-  renderParamQueryChart()
-}
-
 const loadTasks = async () => {
   try {
     const res = await processTaskApi.getAll()
-    tasks.value = res.data
+    tasks.value = (res.data || []).map((t) => ({ ...t, status: normalizeTaskStatus(t.status) }))
   } catch (e) {
     if (e.code === 'ERR_CANCELED' || e.message?.includes('aborted') || e.code === 'ECONNABORTED' || e.message?.includes('timeout')) return
     console.error(e)
@@ -1100,15 +1300,13 @@ const loadRules = async () => {
 
 const loadStats = async () => {
   try {
-    const [taskStats, processedStats, logStats] = await Promise.all([
+    const [taskStats, processedStats] = await Promise.all([
       processTaskApi.getStats(),
-      processedTelemetryApi.getStats(),
-      processLogApi.getStats()
+      processedTelemetryApi.getStats()
     ])
     stats.value.processing = taskStats.data?.running || 0
     stats.value.todayProcessed = processedStats.data?.todayProcessed || 0
     stats.value.deduped = processedStats.data?.todayDeduped || 0
-    stats.value.errors = logStats.data?.errorsToday || 0
   } catch (e) {
     if (e.code === 'ERR_CANCELED' || e.message?.includes('aborted') || e.code === 'ECONNABORTED' || e.message?.includes('timeout')) {
       // Request was aborted or timed out, ignore
@@ -1232,22 +1430,22 @@ onMounted(() => {
   loadMonitorStats()
   loadTelemetry().then(queryTelemetryParams)
   loadParamConfigs()
+  loadDeviceErrors()
   refreshInterval = setInterval(() => {
     loadStats()
     loadMonitorStats()
     loadLogs()
+    loadDeviceErrors()
     if (mainTab.value === 'realtimeMonitor') loadTelemetry()
   }, 15000)
   if (mainTab.value === 'realtimeMonitor') startRealtimeMockFeed()
+  document.addEventListener('click', onColumnPickerOutsideClick)
 })
 
 onUnmounted(() => {
   if (refreshInterval) clearInterval(refreshInterval)
   stopRealtimeMockFeed()
-  if (paramQueryChart) {
-    paramQueryChart.dispose()
-    paramQueryChart = null
-  }
+  document.removeEventListener('click', onColumnPickerOutsideClick)
 })
 
 watch(mainTab, (activeTab) => {
@@ -1256,10 +1454,6 @@ watch(mainTab, (activeTab) => {
   } else {
     stopRealtimeMockFeed()
   }
-})
-
-watch([mainTab, queryResultView], () => {
-  renderParamQueryChart()
 })
 </script>
 
@@ -1408,6 +1602,18 @@ watch([mainTab, queryResultView], () => {
   min-height: 38px;
 }
 
+.param-config-satellite-filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.param-config-satellite-filter label {
+  color: var(--ui-text-muted);
+  font-size: 13px;
+}
+
 .query-param-select {
   width: 100%;
 }
@@ -1420,6 +1626,93 @@ watch([mainTab, queryResultView], () => {
 .param-value {
   color: var(--ui-text-highlighted);
   font-weight: 600;
+}
+
+.frame-preview {
+  color: var(--ui-primary);
+  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.frame-preview:hover {
+  text-decoration: underline;
+}
+
+.frame-view-meta {
+  display: flex;
+  gap: 20px;
+  margin-bottom: 12px;
+  color: var(--ui-text-muted);
+  font-size: 13px;
+}
+
+.frame-hex-dump {
+  max-height: 480px;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-highlighted);
+  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.processed-extra {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.column-picker {
+  position: relative;
+}
+
+.column-picker-panel {
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 6px);
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 150px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg-elevated);
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.22),
+    0 0 0 1px var(--ui-border);
+}
+
+.column-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: var(--ui-radius);
+  color: var(--ui-text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.column-picker-item:hover {
+  background: var(--ui-bg-muted);
+}
+
+.column-picker-item input {
+  accent-color: var(--ui-primary);
+}
+
+.device-error-hint {
+  margin-top: 6px;
+  color: var(--ui-text-muted);
+  font-size: 12px;
 }
 
 .config-status-text {

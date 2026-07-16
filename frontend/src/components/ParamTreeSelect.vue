@@ -108,7 +108,7 @@ const hiddenLabelList = computed(() =>
 
 function addLeaf(rootMap, rootLabel, channelLabel, param) {
   if (!param.value) return
-  const rootKey = rootLabel || '未标识服务器'
+  const rootKey = rootLabel || '未标识设备'
   const channelKey = channelLabel || '默认协议'
   if (!rootMap.has(rootKey)) {
     rootMap.set(rootKey, { key: rootKey, label: rootKey, children: new Map() })

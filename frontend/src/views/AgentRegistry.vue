@@ -3,17 +3,17 @@
     <UiRow :gutter="16" class="stats-row">
       <UiCol :xs="24" :sm="12" :md="6">
         <UiCard class="stat-card">
-          <UiStatistic title="Agent 总数" :value="agentStats.total" />
+          <UiStatistic title="采集代理总数" :value="agentStats.total" />
         </UiCard>
       </UiCol>
       <UiCol :xs="24" :sm="12" :md="6">
         <UiCard class="stat-card">
-          <UiStatistic title="在线 Agent" :value="agentStats.online" :value-style="{ color: 'var(--ui-success)' }" />
+          <UiStatistic title="在线采集代理" :value="agentStats.online" :value-style="{ color: 'var(--ui-success)' }" />
         </UiCard>
       </UiCol>
       <UiCol :xs="24" :sm="12" :md="6">
         <UiCard class="stat-card">
-          <UiStatistic title="异常 Agent" :value="agentStats.error" :value-style="{ color: 'var(--ui-error)' }" />
+          <UiStatistic title="异常采集代理" :value="agentStats.error" :value-style="{ color: 'var(--ui-error)' }" />
         </UiCard>
       </UiCol>
       <UiCol :xs="24" :sm="12" :md="6">
@@ -24,7 +24,7 @@
     </UiRow>
 
     <div class="agent-workspace">
-      <UiCard title="采集代理 (Agent) 列表" class="data-card agent-table-card">
+      <UiCard title="采集代理列表" class="data-card agent-table-card">
         <template #extra>
           <UiButton type="primary" size="small" @click="loadAgents" :loading="agentLoading">刷新</UiButton>
         </template>
@@ -41,7 +41,7 @@
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'agentId'">
-              <span class="agent-id-cell">{{ record.agentId }}</span>
+              <span class="agent-id-cell">{{ record.agentLabel }}</span>
             </template>
             <template v-else-if="column.key === 'status'">
               <UiTag :color="getStatusColor(record.status)">{{ getStatusText(record.status) }}</UiTag>
@@ -53,7 +53,7 @@
         </UiTable>
       </UiCard>
 
-      <UiCard :title="selectedAgent ? selectedAgent.agentId : 'Agent 详情'" class="data-card agent-detail-card">
+      <UiCard :title="selectedAgent ? selectedAgent.agentLabel : '采集代理详情'" class="data-card agent-detail-card">
         <template #extra>
           <div v-if="selectedAgent" class="agent-card-actions">
             <span class="status-pill" :class="'status-' + getStatusTone(selectedAgent.status)">
@@ -79,7 +79,7 @@
             >
               重启
             </UiButton>
-            <UiPopconfirm title="确定删除此 Agent?" @confirm="deleteAgent(selectedAgent.agentId)" ok-text="确定" cancel-text="取消">
+            <UiPopconfirm title="确定删除此采集代理?" @confirm="deleteAgent(selectedAgent.agentId)" ok-text="确定" cancel-text="取消">
               <UiButton size="small" danger>删除</UiButton>
             </UiPopconfirm>
           </div>
@@ -233,7 +233,7 @@
             </div>
           </div>
         </template>
-        <div v-else class="empty-state">暂无 Agent 数据</div>
+        <div v-else class="empty-state">暂无采集代理数据</div>
       </UiCard>
     </div>
   </div>
@@ -253,7 +253,7 @@ const agentControlSupported = false
 const agentControlUnsupportedTip = '当前后端暂未提供采集实例启停/重启控制接口'
 
 const agentColumns = [
-  { title: 'Agent', dataIndex: 'agentId', key: 'agentId', width: 110 },
+  { title: '采集代理', dataIndex: 'agentId', key: 'agentId', width: 110 },
   { title: '主机', dataIndex: 'host', key: 'host', width: 120 },
   { title: '状态', key: 'status', width: 74 },
   { title: '接口', dataIndex: 'instanceCount', key: 'instanceCount', width: 56 },
@@ -428,9 +428,11 @@ const normalizeAgent = (agent) => {
   const lastHeartbeat = valueFrom(agent, ['lastHeartbeat', 'heartbeatTime', 'lastSeen'])
   const firstSeen = valueFrom(agent, ['firstSeen', 'registerTime', 'createdAt'])
 
+  const rawAgentId = valueFrom(agent, ['agentId', 'id', 'name']) || '-'
   return {
     raw: agent,
-    agentId: valueFrom(agent, ['agentId', 'id', 'name']) || '-',
+    agentId: rawAgentId,
+    agentLabel: String(rawAgentId).replace(/^AGENT-/i, '采集代理-'),
     host: valueFrom(agent, ['host', 'ipAddress', 'ip']) || '-',
     osLabel: [os, arch].filter(Boolean).join(' / ') || '-',
     version: valueFrom(agent, ['version', 'agentVersion']) || '-',
@@ -524,7 +526,7 @@ const loadAgents = async () => {
   } catch (error) {
     rawAgents.value = []
     selectedAgentId.value = ''
-    message.error('Agent 列表加载失败')
+    message.error('采集代理列表加载失败')
   } finally {
     agentLoading.value = false
   }

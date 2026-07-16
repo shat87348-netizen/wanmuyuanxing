@@ -658,6 +658,13 @@ textarea {
   border-bottom: 1px solid var(--ui-border);
 }
 
+.ui-tab-panel {
+  /* grid items default to min-width: auto, which lets wide content (e.g. tables
+     with many columns) stretch this panel past the viewport instead of scrolling
+     internally via .ui-table-wrap's overflow-x */
+  min-width: 0;
+}
+
 .ui-tab {
   padding: 8px 10px;
   border: 0;

@@ -1,25 +1,32 @@
 <template>
   <UDashboardGroup>
-    <UDashboardPanel id="main-panel">
-      <UDashboardNavbar :toggle="false" class="top-navbar">
-          <template #left>
-            <div class="top-brand">
-              <div class="brand-lockup">
-                <UIcon name="i-lucide-satellite" class="brand-icon" />
-                <span class="brand-text">数据处理软件</span>
-              </div>
-              <div class="page-title">{{ pageTitle }}</div>
-            </div>
-          </template>
+    <UDashboardSidebar id="main-sidebar" collapsible>
+      <template #header="{ collapsed }">
+        <div class="sidebar-brand" :class="{ collapsed }">
+          <UIcon name="i-lucide-satellite" class="brand-icon" />
+          <span v-if="!collapsed" class="brand-text">数据处理软件</span>
+        </div>
+      </template>
 
-          <div class="header-nav">
-            <UNavigationMenu
-              :items="topNavItems"
-              orientation="horizontal"
-              highlight
-              :content="{ align: 'center', sideOffset: 10 }"
-            />
-          </div>
+      <template #default="{ collapsed }">
+        <UNavigationMenu
+          :items="navItems"
+          orientation="vertical"
+          :collapsed="collapsed"
+          highlight
+        />
+      </template>
+
+      <template #footer="{ collapsed }">
+        <UDashboardSidebarCollapse :class="collapsed ? 'mx-auto' : ''" />
+      </template>
+    </UDashboardSidebar>
+
+    <UDashboardPanel id="main-panel">
+      <UDashboardNavbar :toggle="true" class="top-navbar">
+          <template #left>
+            <div class="page-title">{{ pageTitle }}</div>
+          </template>
 
           <template #right>
             <div class="global-task-control">
@@ -178,25 +185,12 @@ const navItems = computed(() => [
     icon: 'i-lucide-settings',
     defaultOpen: route.path.startsWith('/config'),
     children: [
-      { label: '采集代理 (Agent) 管理', icon: 'i-lucide-server', to: '/config/agents' },
+      { label: '采集代理管理', icon: 'i-lucide-server', to: '/config/agents' },
       { label: '日志管理', icon: 'i-lucide-scroll-text', to: '/config/log' },
       { label: '用户管理', icon: 'i-lucide-users', to: '/config/user' }
     ]
   }
 ])
-
-const topNavItems = computed(() => navItems.value.map(item => {
-  const baseItem = { ...item, icon: undefined }
-  if (item.label !== '系统配置') return baseItem
-  return {
-    ...baseItem,
-    children: item.children.map(child => ({
-      ...child,
-      icon: undefined,
-      label: child.label.replace(' (Agent)', '').replace(' 管理', '')
-    }))
-  }
-}))
 
 const flatNavLookup = computed(() => {
   const map = new Map()
@@ -335,20 +329,6 @@ loadExperimentTasks()
   min-height: 48px;
 }
 
-:global(.top-navbar [data-slot="left"]) {
-  flex: 0 0 260px;
-  min-width: 220px;
-}
-
-:global(.top-navbar [data-slot="center"]) {
-  position: absolute;
-  left: 50%;
-  z-index: 1;
-  flex: none;
-  justify-content: center;
-  transform: translateX(-50%);
-}
-
 :global(.top-navbar [data-slot="right"]) {
   flex: 0 0 auto;
   min-width: 0;
@@ -357,22 +337,20 @@ loadExperimentTasks()
   z-index: 2;
 }
 
-.top-brand {
+.sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 14px;
-  min-width: 0;
-}
-
-.brand-lockup {
-  display: inline-flex;
-  align-items: center;
   gap: 8px;
+  min-width: 0;
   color: var(--ui-primary);
   font-weight: 700;
   font-size: 14px;
   white-space: nowrap;
   overflow: hidden;
+}
+
+.sidebar-brand.collapsed {
+  justify-content: center;
 }
 
 .brand-icon {
@@ -387,28 +365,11 @@ loadExperimentTasks()
 
 .page-title {
   min-width: 0;
-  padding-left: 14px;
-  border-left: 1px solid var(--ui-border-muted);
   color: var(--ui-text-highlighted);
   font-size: 14px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.header-nav {
-  display: flex;
-  justify-content: center;
-  min-width: 0;
-}
-
-.header-nav :deep([data-slot="list"]) {
-  justify-content: center;
-}
-
-.header-nav :deep([data-slot="link"]) {
-  min-height: 34px;
   white-space: nowrap;
 }
 
@@ -476,14 +437,6 @@ loadExperimentTasks()
 }
 
 @media (max-width: 1500px) {
-  :global(.top-navbar [data-slot="left"]) {
-    flex-basis: 220px;
-  }
-
-  .page-title {
-    display: none;
-  }
-
   .global-task-label {
     display: none;
   }

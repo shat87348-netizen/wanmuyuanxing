@@ -156,6 +156,22 @@
           :on-select="openDetail"
           class="alarm-table"
         >
+          <template #select-header="{ table }">
+            <UCheckbox
+              :model-value="table.getIsAllPageRowsSelected() ? true : (table.getIsSomePageRowsSelected() ? 'indeterminate' : false)"
+              aria-label="全选"
+              @update:model-value="table.toggleAllPageRowsSelected(!!$event)"
+            />
+          </template>
+          <template #select-cell="{ row }">
+            <UCheckbox
+              :model-value="row.getIsSelected()"
+              aria-label="选择该行"
+              @update:model-value="row.toggleSelected(!!$event)"
+              @click.stop
+            />
+          </template>
+
           <template #alarmTime-cell="{ row }">
             <span class="mono">{{ formatAlarmTime(row.original.alarmTime) }}</span>
           </template>
@@ -401,6 +417,7 @@ const statusOptions = [
 ]
 
 const columns = [
+  { id: 'select', enableSorting: false, enableHiding: false, size: 44 },
   { accessorKey: 'alarmTime', header: '时间', enableSorting: true, size: 170 },
   { accessorKey: 'alarmSource', header: '来源', size: 180 },
   { accessorKey: 'alarmMessage', header: '告警信息' },

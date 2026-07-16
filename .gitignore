@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+backend/node_modules/
+.tools/
+
+# Build output
+frontend/dist/
+frontend/.vite/
+**/target/
+*.class
+deploy/runtime/
+deploy/data/
+deploy/logs/
+
+# Claude Code workspace state
+.claude/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+
+# Test
+coverage/

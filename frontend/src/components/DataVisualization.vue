@@ -43,7 +43,7 @@
               v-model="widget.params"
               class="widget-param-select"
               :telemetry-data="vizTelemetryCache"
-              :placeholder="widget.type === 'chart' ? '选择服务器协议数据' : '选择服务器协议数据'"
+              :placeholder="widget.type === 'chart' ? '选择设备协议数据' : '选择设备协议数据'"
               :max-tag-count="2"
               @mousedown.stop
               @update:modelValue="onWidgetParamsChange(widget, $event)"
@@ -59,7 +59,7 @@
         </div>
 
         <div class="widget-body">
-          <div v-if="widget.type === 'chart'" :ref="el => setChartRef(widget, el)" class="widget-chart"></div>
+          <TelemetryLineChart v-if="widget.type === 'chart'" :series="chartSeriesFor(widget)" class="widget-chart" />
 
           <div v-else-if="widget.type === 'table'" class="widget-scroll">
             <UiTable
@@ -71,6 +71,9 @@
               :locale="{ emptyText: '暂无数据' }"
             >
               <template #bodyCell="{ column, record }">
+                <template v-if="column.key === 'device'">
+                  {{ record.serverName || record.satelliteId }}
+                </template>
                 <template v-if="column.key === 'protocol'">
                   <UiTag :color="getProtocolColor(record.protocol)">{{ record.protocol }}</UiTag>
                 </template>
@@ -126,10 +129,10 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
-import * as echarts from 'echarts'
 import { telemetryApi, processTaskApi, alarmApi } from '../api'
 import { getRuntimeConfig, isMockEnabled } from '../config/runtime'
 import ParamTreeSelect from './ParamTreeSelect.vue'
+import TelemetryLineChart from './TelemetryLineChart.vue'
 
 const COLS = 24
 const ROW_H = 30
@@ -141,7 +144,6 @@ const tasks = ref([])
 const alarms = ref([])
 const vizTelemetryCache = ref([])
 
-const colors = ['#5470C6', '#91CC75', '#FAC858', '#EE6666', '#73C0DE', '#3BA272', '#FC8452', '#9A60B4']
 const maxDataPoints = 50
 
 let simTimer = null
@@ -154,8 +156,6 @@ const colWidth = ref(0)
 const dragState = ref(null)
 const interacting = computed(() => dragState.value !== null)
 let resizeObserver = null
-
-const chartInstances = new Map()
 
 const widgets = ref(loadLayout() || defaultWidgets())
 
@@ -285,7 +285,6 @@ const onResizeStart = (widget, event) => {
   document.addEventListener('mouseup', onDragEnd)
 }
 
-let pendingResize = null
 const onDragMove = (event) => {
   const s = dragState.value
   if (!s) return
@@ -304,49 +303,14 @@ const onDragMove = (event) => {
   } else {
     s.widget.w = Math.max(3, Math.min(COLS - s.widget.x, s.origW + colDelta))
     s.widget.h = Math.max(4, s.origH + rowDelta)
-    if (s.widget.type === 'chart') {
-      if (pendingResize) cancelAnimationFrame(pendingResize)
-      pendingResize = requestAnimationFrame(() => {
-        const inst = chartInstances.get(s.widget.id)
-        if (inst) inst.resize()
-      })
-    }
   }
 }
 
 const onDragEnd = () => {
   document.removeEventListener('mousemove', onDragMove)
   document.removeEventListener('mouseup', onDragEnd)
-  const s = dragState.value
   dragState.value = null
-  if (s && s.widget.type === 'chart') {
-    nextTick(() => {
-      const inst = chartInstances.get(s.widget.id)
-      if (inst) inst.resize()
-    })
-  }
   saveLayout()
-}
-
-const setChartRef = (widget, el) => {
-  if (el) {
-    if (!chartInstances.has(widget.id)) {
-      nextTick(() => {
-        if (chartInstances.has(widget.id)) return
-        const inst = echarts.init(el)
-        chartInstances.set(widget.id, inst)
-        if ((!widget.params || widget.params.length === 0) && vizTelemetryCache.value.length > 0) {
-          widget.params = pickDefaultParams()
-        }
-        widget.dataMap = widget.dataMap || {}
-        generateInitialData(widget)
-        updateChartWidget(widget)
-      })
-    }
-  } else if (chartInstances.has(widget.id)) {
-    chartInstances.get(widget.id).dispose()
-    chartInstances.delete(widget.id)
-  }
 }
 
 const addChartWidget = () => {
@@ -354,14 +318,17 @@ const addChartWidget = () => {
   const w = 12
   const h = 11
   const y = nextRowAvailable(w, h)
-  widgets.value.push({
+  const widget = {
     id,
     type: 'chart',
     title: '实时曲线',
     x: 0, y, w, h,
-    params: [],
+    params: vizTelemetryCache.value.length > 0 ? pickDefaultParams() : [],
     dataMap: {},
-  })
+  }
+  widgets.value.push(widget)
+  generateInitialData(widget)
+  syncSimulationTimer()
   saveLayout()
 }
 
@@ -388,11 +355,6 @@ function nextRowAvailable() {
 const removeWidget = (id) => {
   const idx = widgets.value.findIndex(w => w.id === id)
   if (idx < 0) return
-  const widget = widgets.value[idx]
-  if (widget.type === 'chart' && chartInstances.has(id)) {
-    chartInstances.get(id).dispose()
-    chartInstances.delete(id)
-  }
   widgets.value.splice(idx, 1)
   saveLayout()
   syncSimulationTimer()
@@ -404,7 +366,6 @@ const onWidgetParamsChange = (widget, params) => {
     widget.dataMap = {}
     params.forEach(p => { widget.dataMap[p] = [] })
     generateInitialData(widget)
-    updateChartWidget(widget)
   } else if (widget.type === 'table') {
     widget.rows = makeTableRows(params, Date.now())
   }
@@ -446,8 +407,6 @@ const onImportFile = (event) => {
       const data = JSON.parse(e.target.result)
       const incoming = Array.isArray(data?.widgets) ? data.widgets : (Array.isArray(data) ? data : null)
       if (!incoming) throw new Error('配置文件格式不正确')
-      chartInstances.forEach(inst => inst.dispose())
-      chartInstances.clear()
       widgets.value = incoming.map(w => ({
         ...w,
         params: w.params || [],
@@ -459,7 +418,6 @@ const onImportFile = (event) => {
         widgets.value.forEach(widget => {
           if (widget.type === 'chart') {
             generateInitialData(widget)
-            updateChartWidget(widget)
           } else if (widget.type === 'table') {
             widget.rows = makeTableRows(widget.params, Date.now())
           }
@@ -494,7 +452,7 @@ const experimentTaskOptions = computed(() => {
 const alarmTableData = computed(() => alarms.value.map((item, index) => ({ ...item, key: item.id || index })))
 
 const columns = [
-  { title: '服务器', dataIndex: 'serverName', width: 150 },
+  { title: '设备/星', key: 'device', dataIndex: 'serverName', width: 150 },
   { title: '协议', key: 'protocol', width: 90 },
   { title: '类型', key: 'type', width: 70 },
   { title: '数据项', dataIndex: 'paramName', width: 100 },
@@ -504,6 +462,7 @@ const columns = [
 
 const alarmColumns = [
   { title: '时间', key: 'time', width: 115 },
+  { title: '代号', dataIndex: 'paramCode', width: 70 },
   { title: '参数名称', dataIndex: 'paramName', width: 100 },
   { title: '当前值', key: 'currentValue', width: 100 },
   { title: '阈值', key: 'threshold', width: 90 },
@@ -525,10 +484,10 @@ const parseValue = (value) => {
 }
 
 const lanServers = [
-  { id: 'srv-a', name: '采集服务器-A', ip: '192.168.10.21' },
-  { id: 'srv-b', name: '采集服务器-B', ip: '192.168.10.22' },
-  { id: 'srv-c', name: '处理服务器-C', ip: '192.168.10.31' },
-  { id: 'srv-d', name: '转发服务器-D', ip: '192.168.10.41' },
+  { id: 'srv-a', name: '采集设备-A', ip: '192.168.10.21' },
+  { id: 'srv-b', name: '采集设备-B', ip: '192.168.10.22' },
+  { id: 'srv-c', name: '处理设备-C', ip: '192.168.10.31' },
+  { id: 'srv-d', name: '转发设备-D', ip: '192.168.10.41' },
 ]
 
 const runtimeProtocols = ['Protobuf', 'PDXP', 'JSON']
@@ -544,6 +503,29 @@ const detectProtocol = (item, index = 0) => {
 }
 
 const normalizeRuntimeData = (item = {}, index = 0) => {
+  const isSatelliteSource = !!item.satelliteId && !item.serverId && !item.serverName
+  if (isSatelliteSource) {
+    const protocol = detectProtocol(item, index)
+    const sourceCode = item.sourceCode || item.telemetryCode || item.paramCode || item.code || `S${String(index + 1).padStart(3, '0')}`
+    const paramName = item.paramName || item.name || item.telemetryName || '卫星遥测'
+    const value = item.paramValue ?? item.value ?? item.telemetryValue ?? (Math.random() * 90 + 10).toFixed(2)
+    return {
+      ...item,
+      id: item.id || `${item.satelliteId}-${protocol}-${sourceCode}-${index}`,
+      protocol,
+      channel: protocol,
+      satelliteId: item.satelliteId,
+      sourceCode,
+      telemetryCode: item.telemetryCode || `${item.satelliteId}-${protocol}-${sourceCode}`,
+      displayCode: sourceCode,
+      optionLabel: item.optionLabel || `${sourceCode} / ${paramName}`,
+      paramName,
+      paramType: item.paramType || '遥测',
+      paramValue: value,
+      status: item.status || '正常',
+      timestamp: item.timestamp || item.collectTime || new Date().toISOString(),
+    }
+  }
   const server = lanServers.find(s =>
     s.id === item.serverId ||
     s.ip === item.serverIp ||
@@ -690,48 +672,10 @@ const generateInitialData = (widget) => {
   })
 }
 
-const updateChartWidget = (widget) => {
-  const inst = chartInstances.get(widget.id)
-  if (!inst) return
-  const series = widget.params.map((param, index) => ({
-    name: paramDisplayName(param),
-    type: 'line',
-    smooth: false,
-    symbol: 'none',
-    data: widget.dataMap?.[param] || [],
-    itemStyle: { color: colors[index % colors.length] },
-    lineStyle: { width: 2 },
-  }))
-  inst.setOption({
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'cross' },
-      valueFormatter: (value) => (typeof value === 'number' ? value.toFixed(2) : value),
-    },
-    legend: {
-      data: widget.params.map(paramDisplayName),
-      textStyle: { color: '#8ABBDB' },
-      top: 0,
-    },
-    grid: { left: '3%', right: '4%', bottom: '3%', top: 30, containLabel: true },
-    xAxis: {
-      type: 'time',
-      axisLabel: {
-        color: '#8ABBDB',
-        formatter: (value) => new Date(value).toLocaleTimeString('zh-CN', { hour12: false }),
-      },
-      axisLine: { lineStyle: { color: '#3a3a4a' } },
-      splitLine: { show: false },
-    },
-    yAxis: {
-      type: 'value',
-      axisLabel: { color: '#8ABBDB' },
-      axisLine: { lineStyle: { color: '#3a3a4a' } },
-      splitLine: { lineStyle: { color: '#2a2a3a' } },
-    },
-    series,
-  }, true)
-}
+const chartSeriesFor = (widget) => widget.params.map(param => ({
+  name: paramDisplayName(param),
+  data: widget.dataMap?.[param] || []
+}))
 
 const makeTableRows = (params, now) => {
   const source = vizTelemetryCache.value.length ? vizTelemetryCache.value : getFallbackTelemetryCache()
@@ -779,7 +723,6 @@ const simulateTick = () => {
         widget.dataMap[param].push([now, v])
         if (widget.dataMap[param].length > maxDataPoints) widget.dataMap[param].shift()
       })
-      updateChartWidget(widget)
     } else if (widget.type === 'table') {
       widget.rows = makeTableRows(widget.params, now)
     }
@@ -787,15 +730,16 @@ const simulateTick = () => {
 }
 
 const loadTelemetryCache = async () => {
+  // 设备（地面站/服务器）遥测是本地模拟数据源，与接口返回的卫星遥测数据平级展示
+  const deviceRows = getFallbackTelemetryCache()
   try {
     const res = await telemetryApi.getRecent(500)
     const data = res.data || []
-    vizTelemetryCache.value = data.length > 0
-      ? data.map((item, index) => normalizeRuntimeData(item, index))
-      : getFallbackTelemetryCache()
+    const satelliteRows = data.map((item, index) => normalizeRuntimeData(item, index))
+    vizTelemetryCache.value = [...deviceRows, ...satelliteRows]
   } catch (e) {
     console.error('loadTelemetryCache error:', e)
-    vizTelemetryCache.value = getFallbackTelemetryCache()
+    vizTelemetryCache.value = deviceRows
   }
   const validParamSet = new Set(vizTelemetryCache.value.map(item => item.telemetryCode))
   const defaultParams = pickDefaultParams()
@@ -807,7 +751,6 @@ const loadTelemetryCache = async () => {
       if (widget.type === 'chart') {
         widget.dataMap = {}
         generateInitialData(widget)
-        nextTick(() => updateChartWidget(widget))
       } else if (widget.type === 'table') {
         widget.rows = makeTableRows(widget.params, Date.now())
       }
@@ -830,21 +773,34 @@ const loadExperimentTasks = async () => {
 const loadFallbackAlarms = () => {
   const now = Date.now()
   alarms.value = [
-    { id: 'fb-1', paramName: '温度', currentValue: 72.5, thresholdValue: 70, thresholdType: 'UPPER', unit: '°C', alarmTime: new Date(now - 2000).toISOString() },
-    { id: 'fb-2', paramName: '母线电压', currentValue: 21.3, thresholdValue: 22, thresholdType: 'LOWER', unit: 'V', alarmTime: new Date(now - 6000).toISOString() },
-    { id: 'fb-3', paramName: '存储容量', currentValue: 92.1, thresholdValue: 90, thresholdType: 'UPPER', unit: '%', alarmTime: new Date(now - 9000).toISOString() },
+    { id: 'fb-1', paramCode: 'T001', paramName: '温度', currentValue: 72.5, thresholdValue: 70, thresholdType: 'UPPER', unit: '°C', alarmTime: new Date(now - 2000).toISOString() },
+    { id: 'fb-2', paramCode: 'V001', paramName: '母线电压', currentValue: 21.3, thresholdValue: 22, thresholdType: 'LOWER', unit: 'V', alarmTime: new Date(now - 6000).toISOString() },
+    { id: 'fb-3', paramCode: 'M001', paramName: '存储容量', currentValue: 92.1, thresholdValue: 90, thresholdType: 'UPPER', unit: '%', alarmTime: new Date(now - 9000).toISOString() },
   ]
+}
+
+const alarmSourceCodeMap = {
+  '温度监控': 'T001',
+  '电压监控': 'V001',
+  '通信链路': 'S001',
+  '存储系统': 'M001',
+  '电源系统': 'B001',
+  '姿态控制': 'A001',
+  '载荷设备': 'P001',
 }
 
 const normalizeAlarm = (payload) => {
   const ts = payload.timestampMs || payload.timestamp || payload.time || Date.now()
   const paramName = payload.paramName || payload.paramCode || payload.source || '遥测参数'
+  const source = payload.source || payload.alarmSource || ''
+  const paramCode = payload.paramCode || payload.telemetryCode || payload.code || payload.sourceCode || alarmSourceCodeMap[source] || ''
   const currentValue = parseValue(payload.currentValue ?? payload.value ?? payload.paramValue)
   const thresholdValue = parseValue(payload.thresholdValue ?? payload.threshold ?? payload.upperLimit ?? payload.lowerLimit)
   const thresholdType = normalizeThresholdType(payload.thresholdType || payload.direction || payload.comparison, currentValue, thresholdValue)
   return {
     id: payload.id || `${paramName}-${ts}-${Math.random().toString(16).slice(2)}`,
     alarmTime: payload.alarmTime || payload.timestamp || payload.time || new Date(ts).toISOString(),
+    paramCode,
     paramName,
     currentValue,
     thresholdValue,
@@ -929,7 +885,6 @@ const connectAlarmSocket = () => {
 
 const onWindowResize = () => {
   recomputeColWidth()
-  chartInstances.forEach(inst => inst.resize())
 }
 
 onMounted(async () => {
@@ -938,7 +893,6 @@ onMounted(async () => {
   if (typeof ResizeObserver !== 'undefined' && gridRef.value) {
     resizeObserver = new ResizeObserver(() => {
       recomputeColWidth()
-      chartInstances.forEach(inst => inst.resize())
     })
     resizeObserver.observe(gridRef.value)
   }
@@ -959,8 +913,6 @@ onUnmounted(() => {
   if (alarmSocket) alarmSocket.close()
   if (resizeObserver) resizeObserver.disconnect()
   window.removeEventListener('resize', onWindowResize)
-  chartInstances.forEach(inst => inst.dispose())
-  chartInstances.clear()
 })
 </script>
 

@@ -1,6 +1,6 @@
 <template>
   <nav class="config-subnav" aria-label="系统配置二级菜单">
-    <RouterLink to="/config/agents" class="config-subnav-link">采集代理 (Agent) 管理</RouterLink>
+    <RouterLink to="/config/agents" class="config-subnav-link">采集代理管理</RouterLink>
     <RouterLink to="/config/log" class="config-subnav-link">日志管理</RouterLink>
     <RouterLink to="/config/user" class="config-subnav-link">用户管理</RouterLink>
   </nav>

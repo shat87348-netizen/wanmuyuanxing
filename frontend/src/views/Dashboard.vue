@@ -9,7 +9,7 @@
           @click="goTo('/config/agents')"
           @keyup.enter="goTo('/config/agents')"
         >
-          <UiStatistic title="在线Agent" :value="formatNumber(stats.onlineAgents)" :value-style="{ color: '#8ABBDB' }">
+          <UiStatistic title="在线采集代理" :value="formatNumber(stats.onlineAgents)" :value-style="{ color: '#8ABBDB' }">
             <template #prefix><ApiOutlined /></template>
           </UiStatistic>
         </UiCard>

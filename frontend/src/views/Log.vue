@@ -6,7 +6,7 @@
           <UiFormItem label="级别">
             <UiSelect v-model:value="filters.level" placeholder="全部级别">
               <UiSelectOption value="">全部级别</UiSelectOption>
-              <UiSelectOption v-for="lvl in levelOptions" :key="lvl" :value="lvl">{{ lvl }}</UiSelectOption>
+              <UiSelectOption v-for="lvl in levelOptions" :key="lvl.value" :value="lvl.value">{{ lvl.label }}</UiSelectOption>
             </UiSelect>
           </UiFormItem>
           <UiFormItem label="来源">
@@ -42,7 +42,7 @@
       <UiTable :columns="columns" :data-source="filteredLogs" :loading="loading" :pagination="{ pageSize: 10 }" row-key="id">
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'level'">
-            <UiTag :color="getLevelColor(record.level)">{{ record.level || '-' }}</UiTag>
+            <UiTag :color="getLevelColor(record.level)">{{ getLevelText(record.level) }}</UiTag>
           </template>
           <template v-if="column.key === 'action'">
             <UiButton type="link" size="small" @click="viewDetail(record)">详情</UiButton>
@@ -56,7 +56,7 @@
       <UiDescriptions :column="1" bordered size="small">
         <UiDescriptionsItem label="时间">{{ currentLog.timeText }}</UiDescriptionsItem>
         <UiDescriptionsItem label="级别">
-          <UiTag :color="getLevelColor(currentLog.level)">{{ currentLog.level || '-' }}</UiTag>
+          <UiTag :color="getLevelColor(currentLog.level)">{{ getLevelText(currentLog.level) }}</UiTag>
         </UiDescriptionsItem>
         <UiDescriptionsItem label="来源">{{ currentLog.source || currentLog.module || '-' }}</UiDescriptionsItem>
         <UiDescriptionsItem label="操作人">{{ currentLog.username || '-' }}</UiDescriptionsItem>
@@ -86,7 +86,12 @@ const filters = reactive({
   keyword: ''
 })
 
-const levelOptions = ['INFO', 'WARN', 'ERROR', 'DEBUG']
+const levelOptions = [
+  { label: '信息', value: 'INFO' },
+  { label: '警告', value: 'WARN' },
+  { label: '错误', value: 'ERROR' },
+  { label: '调试', value: 'DEBUG' }
+]
 
 const sourceOptions = computed(() => {
   const set = new Set()
@@ -109,6 +114,10 @@ const columns = [
 
 const getLevelColor = (level) => {
   return { INFO: 'blue', WARN: 'orange', ERROR: 'red', DEBUG: 'default' }[level] || 'default'
+}
+
+const getLevelText = (level) => {
+  return { INFO: '信息', WARN: '警告', WARNING: '警告', ERROR: '错误', DEBUG: '调试' }[String(level || '').toUpperCase()] || level || '-'
 }
 
 const formatDateTime = (value) => {
