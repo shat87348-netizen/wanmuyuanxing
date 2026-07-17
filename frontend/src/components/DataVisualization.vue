@@ -113,9 +113,55 @@
             </UiTable>
           </div>
 
-          <div v-else-if="widget.type === 'image'" class="widget-image">
-            <PictureOutlined class="placeholder-icon" />
-            <p>等待图像数据...</p>
+          <div v-else-if="widget.type === 'image'" class="widget-image-panel">
+            <div class="image-preview-pane">
+              <template v-if="selectedImageId[widget.id] != null">
+                <div class="image-nodata-preview">
+                  <svg class="nodata-svg" viewBox="0 0 120 80" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="120" height="80" fill="none"/>
+                    <line x1="0" y1="0" x2="120" y2="80" stroke="currentColor" stroke-width="1" opacity="0.3"/>
+                    <line x1="120" y1="0" x2="0" y2="80" stroke="currentColor" stroke-width="1" opacity="0.3"/>
+                    <text x="60" y="44" text-anchor="middle" font-size="12" fill="currentColor" opacity="0.6">nodata</text>
+                  </svg>
+                  <span class="nodata-label">{{ imageList.find(i => i.id === selectedImageId[widget.id])?.label }}</span>
+                  <span class="nodata-time">{{ imageList.find(i => i.id === selectedImageId[widget.id])?.time }}</span>
+                </div>
+              </template>
+              <template v-else>
+                <div class="image-preview-empty">
+                  <svg class="empty-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="1.5"/>
+                    <circle cx="8.5" cy="10.5" r="1.5" stroke="currentColor" stroke-width="1.5"/>
+                    <path d="M3 16l4-4 3 3 4-5 7 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  <span>点击右侧列表选择图像</span>
+                </div>
+              </template>
+            </div>
+            <div class="image-table-pane">
+              <UiTable
+                :columns="imageColumns"
+                :data-source="imageList"
+                size="small"
+                row-key="id"
+                :scroll="{ x: 560 }"
+                :pagination="{ pageSize: 8, size: 'small', showTotal: total => `共 ${total} 张` }"
+                :custom-row="(record) => ({ onClick: () => selectImage(widget.id, record.id), class: selectedImageId[widget.id] === record.id ? 'image-row-active' : 'image-row' })"
+                :locale="{ emptyText: '暂无图像' }"
+              >
+                <template #bodyCell="{ column, record }">
+                  <template v-if="column.key === 'status'">
+                    <span :class="['image-status-badge', `image-status-${record.status}`]">{{ imageStatusText(record.status) }}</span>
+                  </template>
+                  <template v-else-if="column.key === 'action'">
+                    <div class="image-action-btns" @click.stop>
+                      <button class="img-act-btn" title="预览" @click="selectImage(widget.id, record.id)">预览</button>
+                      <button class="img-act-btn img-act-dl" title="下载" @click="downloadImage(record)">下载</button>
+                    </div>
+                  </template>
+                </template>
+              </UiTable>
+            </div>
           </div>
         </div>
 
@@ -143,6 +189,53 @@ const selectedExperimentTask = ref('')
 const tasks = ref([])
 const alarms = ref([])
 const vizTelemetryCache = ref([])
+
+const IMG_SATELLITES = ['SAT-001', 'SAT-002', 'SAT-003']
+const IMG_RESOLUTIONS = ['1024×768', '2048×1536', '4096×3072', '512×512']
+const IMG_BANDS = ['可见光', '红外', '多光谱', '高光谱']
+const IMG_STATUSES = ['nodata', 'nodata', 'nodata', 'pending', 'done', 'done']
+
+const imageList = (() => {
+  const now = Date.now()
+  const pad = n => String(n).padStart(2, '0')
+  return Array.from({ length: 24 }, (_, i) => {
+    const d = new Date(now - i * 37000)
+    const status = IMG_STATUSES[i % IMG_STATUSES.length]
+    const kb = 800 + Math.round(Math.sin(i * 1.3) * 600 + Math.random() * 400)
+    return {
+      id: `img-${i}`,
+      label: `IMG-${pad(i + 1)}`,
+      satellite: IMG_SATELLITES[i % IMG_SATELLITES.length],
+      time: `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
+      resolution: IMG_RESOLUTIONS[i % IMG_RESOLUTIONS.length],
+      band: IMG_BANDS[i % IMG_BANDS.length],
+      size: kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`,
+      status,
+    }
+  })
+})()
+
+const imageColumns = [
+  { title: '编号', dataIndex: 'label', key: 'label', width: 82 },
+  { title: '卫星', dataIndex: 'satellite', key: 'satellite', width: 74 },
+  { title: '波段', dataIndex: 'band', key: 'band', width: 64 },
+  { title: '分辨率', dataIndex: 'resolution', key: 'resolution', width: 88 },
+  { title: '大小', dataIndex: 'size', key: 'size', width: 72 },
+  { title: '状态', key: 'status', width: 70 },
+  { title: '操作', key: 'action', width: 88 },
+]
+
+const imageStatusText = (status) => ({ nodata: 'nodata', pending: '待下传', done: '已下传' }[status] || status)
+
+const downloadImage = (record) => {
+  message.success(`${record.label} 下载指令已下发`)
+}
+
+const selectedImageId = reactive({})
+
+const selectImage = (widgetId, imgId) => {
+  selectedImageId[widgetId] = imgId
+}
 
 const maxDataPoints = 50
 
@@ -1094,19 +1187,160 @@ onUnmounted(() => {
   padding: 0 4px;
 }
 
-.widget-image {
+.widget-image-panel {
+  display: flex;
   height: 100%;
+  overflow: hidden;
+}
+
+.image-preview-pane {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--ui-bg-muted) 55%, transparent);
+  border-right: 1px solid var(--ui-border-muted);
+}
+
+.image-nodata-preview {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  gap: 8px;
+  width: 80%;
   color: var(--ui-text-muted);
-  background: color-mix(in srgb, var(--ui-bg-muted) 60%, transparent);
 }
 
-.placeholder-icon {
-  font-size: 36px;
-  margin-bottom: 8px;
+.nodata-svg {
+  width: 100%;
+  max-width: 280px;
+  border: 1px dashed var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg-elevated);
+  color: var(--ui-text-muted);
+}
+
+.nodata-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ui-text);
+}
+
+.nodata-time {
+  font-size: 11px;
+  color: var(--ui-text-dimmed);
+}
+
+.image-preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--ui-text-muted);
+  font-size: 12px;
+}
+
+.empty-icon {
+  width: 40px;
+  height: 40px;
+  color: var(--ui-text-dimmed);
+}
+
+.image-table-pane {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--ui-border-muted);
+}
+
+.image-table-pane :deep(.ui-table-body) {
+  overflow-x: auto !important;
+}
+
+.image-table-pane :deep(.ui-table) {
+  font-size: 12px;
+}
+
+.image-table-pane :deep(.ui-table th),
+.image-table-pane :deep(.ui-table td) {
+  padding: 5px 8px !important;
+  font-size: 12px;
+}
+
+.image-table-pane :deep(.image-row) {
+  cursor: pointer;
+}
+
+.image-table-pane :deep(.image-row:hover td) {
+  background: color-mix(in srgb, var(--ui-primary) 8%, var(--ui-bg-elevated)) !important;
+}
+
+.image-table-pane :deep(.image-row-active td) {
+  background: color-mix(in srgb, var(--ui-primary) 14%, var(--ui-bg-elevated)) !important;
+  cursor: pointer;
+}
+
+.image-table-pane :deep(.image-row-active td:first-child) {
+  box-shadow: inset 3px 0 0 var(--ui-primary);
+}
+
+.image-table-pane :deep(.ui-pagination) {
+  padding: 6px 8px;
+  margin: 0 !important;
+  border-top: 1px solid var(--ui-border-muted);
+  font-size: 11px;
+}
+
+.image-status-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--ui-text-muted);
+  background: var(--ui-bg-muted);
+  border: 1px solid var(--ui-border-muted);
+}
+
+.image-status-done {
+  color: var(--ui-success);
+  background: color-mix(in srgb, var(--ui-success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ui-success) 30%, transparent);
+}
+
+.image-status-pending {
+  color: var(--ui-warning, #f59e0b);
+  background: color-mix(in srgb, var(--ui-warning, #f59e0b) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ui-warning, #f59e0b) 30%, transparent);
+}
+
+.image-action-btns {
+  display: flex;
+  gap: 4px;
+}
+
+.img-act-btn {
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 18px;
+  border-radius: var(--ui-radius);
+  border: 1px solid var(--ui-border);
+  background: transparent;
+  color: var(--ui-text-muted);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.img-act-btn:hover {
+  color: var(--ui-primary);
+  border-color: var(--ui-primary);
+}
+
+.img-act-dl:hover {
+  color: var(--ui-success);
+  border-color: var(--ui-success);
 }
 
 .widget-resize {

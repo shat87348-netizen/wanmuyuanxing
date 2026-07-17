@@ -92,18 +92,6 @@
               <strong>{{ selectedAgent.host }}</strong>
             </div>
             <div class="agent-meta-item">
-              <span>操作系统</span>
-              <strong>{{ selectedAgent.osLabel }}</strong>
-            </div>
-            <div class="agent-meta-item">
-              <span>版本</span>
-              <strong>{{ selectedAgent.version }}</strong>
-            </div>
-            <div class="agent-meta-item">
-              <span>部署形态</span>
-              <strong>{{ selectedAgent.deployForm }}</strong>
-            </div>
-            <div class="agent-meta-item">
               <span>首次注册</span>
               <strong>{{ selectedAgent.firstSeenText }}</strong>
             </div>
@@ -114,10 +102,6 @@
             <div class="agent-meta-item">
               <span>采集协议</span>
               <strong>{{ selectedAgent.protocolText }}</strong>
-            </div>
-            <div class="agent-meta-item">
-              <span>限速</span>
-              <strong>{{ selectedAgent.rateLimitText }}</strong>
             </div>
             <div class="agent-meta-item">
               <span>速率</span>
@@ -155,7 +139,6 @@
                 </div>
                 <div class="instance-main-right">
                   <UiTag :color="getStatusColor(instance.state)" size="small">{{ getStatusText(instance.state) }}</UiTag>
-                  <button type="button" class="rate-limit-btn" @click="toggleRateLimit(instance.interfaceInstanceId)">限速</button>
                 </div>
               </div>
 
@@ -164,29 +147,6 @@
                 <span>消息 {{ formatNumber(instance.rxMessages) }}</span>
                 <span>字节 {{ formatBytes(instance.rxBytes) }}</span>
                 <span>异常 {{ formatNumber(instance.errorCount) }}</span>
-              </div>
-
-              <div v-if="rateLimits[instance.interfaceInstanceId]" class="rate-limit-current">
-                当前限速：{{ formatNumber(rateLimits[instance.interfaceInstanceId]) }} 条/s
-              </div>
-
-              <div v-if="rateLimitOpen[instance.interfaceInstanceId]" class="rate-limit-panel">
-                <UiSlider
-                  v-model:value="rateLimitDraft[instance.interfaceInstanceId]"
-                  :min="0"
-                  :max="10000"
-                  :step="50"
-                  class="rate-limit-slider"
-                />
-                <UiInputNumber
-                  v-model:value="rateLimitDraft[instance.interfaceInstanceId]"
-                  :min="0"
-                  :max="1000000"
-                  class="rate-limit-input"
-                />
-                <span class="rate-limit-unit">条/s</span>
-                <UiButton type="primary" size="small" @click="applyRateLimit(instance.interfaceInstanceId)">确定</UiButton>
-                <UiButton size="small" @click="rateLimitOpen[instance.interfaceInstanceId] = false">取消</UiButton>
               </div>
 
               <div class="instance-chart-block">
@@ -333,14 +293,6 @@ const formatBytes = (value) => {
   return `${Math.round(size * 10) / 10} ${units[unitIndex]}`
 }
 
-const formatRateLimit = (value) => {
-  if (value === undefined || value === null || value === '') return '未限制'
-  if (typeof value === 'string') return value
-  const numeric = Number(value)
-  if (Number.isNaN(numeric)) return String(value)
-  return numeric > 0 ? `${numeric.toLocaleString('zh-CN')} 条/s` : '未限制'
-}
-
 const protocolName = (protocol) => {
   if (typeof protocol === 'string') return protocol
   return valueFrom(protocol, ['protocol', 'name', 'type', 'protocolType'])
@@ -350,16 +302,6 @@ const getProtocols = (agent, instances) => {
   const topLevel = toArray(valueFrom(agent, ['protocols', 'protocolList', 'collectProtocols'])).map(protocolName).filter(Boolean)
   const fromInstances = instances.map(instance => instance.protocol).filter(Boolean)
   return Array.from(new Set([...topLevel, ...fromInstances]))
-}
-
-const getRateLimit = (agent, instances) => {
-  const agentLimit = valueFrom(agent, ['rateLimit', 'rateLimitPerSecond', 'speedLimit', 'bandwidthLimit', 'limitRate', 'rxRateLimit', 'maxRate', 'maxRxRate'])
-  if (agentLimit !== undefined) return agentLimit
-  for (const instance of instances) {
-    const instanceLimit = valueFrom(instance, ['rateLimit', 'rateLimitPerSecond', 'speedLimit', 'bandwidthLimit', 'limitRate', 'rxRateLimit', 'maxRate', 'maxRxRate'])
-    if (instanceLimit !== undefined) return instanceLimit
-  }
-  return undefined
 }
 
 const getCommunicationEvents = (agent, instances) => {
@@ -420,7 +362,6 @@ const normalizeAgent = (agent) => {
     lastEventTime: valueFrom(instance, ['lastEventTime', 'eventTime'])
   }))
   const protocols = getProtocols(agent, instances)
-  const rateLimit = getRateLimit(agent, instances)
   const totalRate = instances.reduce((sum, instance) => sum + toNumber(instance.rxRate), 0)
   const totalMessages = instances.reduce((sum, instance) => sum + toNumber(instance.rxMessages), 0)
   const os = valueFrom(agent, ['os', 'operatingSystem', 'platform'])
@@ -445,8 +386,6 @@ const normalizeAgent = (agent) => {
     memUsage: valueFrom(agent, ['memUsage', 'memoryUsage', 'mem']),
     protocols,
     protocolText: protocols.length > 0 ? protocols.join('、') : '-',
-    rateLimit,
-    rateLimitText: formatRateLimit(rateLimit),
     totalRate,
     totalRateText: formatRate(totalRate),
     totalMessages,
@@ -586,31 +525,15 @@ const stopAgent = (agent) => runAgentAction(agent, 'stop')
 
 const restartAgent = (agent) => runAgentAction(agent, 'restart')
 
-// ── 接口限速 + 速率曲线 ───────────────────────────────────────────
+// ── 速率曲线 ─────────────────────────────────────────────────────
 const RATE_POINTS = 30
 const instanceChartEls = new Map()
 const instanceCharts = new Map()
 const instanceMetric = reactive({})
-const rateLimitOpen = reactive({})
-const rateLimitDraft = reactive({})
-const rateLimits = reactive({})
 
 const setInstanceChartRef = (id, el) => {
   if (el) instanceChartEls.set(id, el)
   else instanceChartEls.delete(id)
-}
-
-const toggleRateLimit = (id) => {
-  const next = !rateLimitOpen[id]
-  rateLimitOpen[id] = next
-  if (next && rateLimitDraft[id] == null) rateLimitDraft[id] = rateLimits[id] || 0
-}
-
-const applyRateLimit = (id) => {
-  const value = Number(rateLimitDraft[id]) || 0
-  rateLimits[id] = value
-  rateLimitOpen[id] = false
-  message.success(value > 0 ? `已设置限速 ${value.toLocaleString('zh-CN')} 条/s` : '已取消限速')
 }
 
 const setInstanceMetric = (id, metric) => {
@@ -964,53 +887,6 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-}
-
-.rate-limit-btn {
-  padding: 1px 9px;
-  font-size: 11px;
-  line-height: 18px;
-  color: var(--ui-primary);
-  background: color-mix(in srgb, var(--ui-primary) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--ui-primary) 30%, transparent);
-  border-radius: 999px;
-  cursor: pointer;
-}
-
-.rate-limit-btn:hover {
-  background: color-mix(in srgb, var(--ui-primary) 20%, transparent);
-}
-
-.rate-limit-current {
-  margin-top: 6px;
-  color: var(--ui-primary);
-  font-size: 11px;
-}
-
-.rate-limit-panel {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-  padding: 8px;
-  border-radius: var(--ui-radius);
-  background: var(--ui-bg-muted);
-}
-
-.rate-limit-slider {
-  flex: 1 1 auto;
-  min-width: 80px;
-}
-
-.rate-limit-input {
-  width: 96px;
-  flex: none;
-}
-
-.rate-limit-unit {
-  flex: none;
-  color: var(--ui-text-muted);
-  font-size: 11px;
 }
 
 .instance-chart-block {
