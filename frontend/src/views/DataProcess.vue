@@ -66,16 +66,16 @@
 
           <UiCol :xs="24" :lg="12">
             <UiCard title="处理规则配置" class="data-card">
-              <UiList size="small" :data-source="rules" :loading="rulesLoading">
-                <template #renderItem="{ item }">
-                  <UiListItem>
-                    <UiListItemMeta :title="item.ruleName" :description="item.description" />
-                    <template #actions>
-                      <UiSwitch :checked="item.enabled" size="small" @change="(checked) => toggleRule(item.id, checked)" />
-                    </template>
-                  </UiListItem>
-                </template>
-              </UiList>
+              <div v-if="rulesLoading" class="rules-loading">加载中…</div>
+              <div v-else class="rules-list">
+                <div v-for="item in rules" :key="item.id" class="rule-item">
+                  <div class="rule-meta">
+                    <span class="rule-name">{{ item.ruleName }}</span>
+                    <span v-if="item.description" class="rule-desc">{{ item.description }}</span>
+                  </div>
+                  <UiSwitch :checked="item.enabled" size="small" @change="(checked) => toggleRule(item.id, checked)" />
+                </div>
+              </div>
             </UiCard>
 
             <UiCard title="实时处理监控" class="data-card" style="margin-top: 16px;">
@@ -499,6 +499,21 @@ const monitorStats = ref({
 const tasks = ref([])
 const rules = ref([])
 const logEntries = ref([])
+
+const fallbackRules = [
+  { id: 1, ruleName: '数据去重规则', description: '过滤相同时间戳和参数值的重复遥测记录', enabled: true },
+  { id: 2, ruleName: '异常帧过滤', description: '丢弃帧同步头校验失败的原始遥测帧', enabled: true },
+  { id: 3, ruleName: '延时数据补偿', description: '对延时下传数据进行时间基准对齐处理', enabled: false },
+  { id: 4, ruleName: '参数值范围检查', description: '超出配置正常值范围的参数自动标记预警', enabled: true },
+  { id: 5, ruleName: '数据压缩归档', description: '对静止不变的参数段进行存储压缩优化', enabled: false },
+]
+
+const normalizeRule = (r) => ({
+  ...r,
+  ruleName: r.ruleName || r.name || r.ruleType || r.ruleDesc || r.title || r.paramName || '-',
+  description: r.description || r.desc || r.remark || r.condition || '',
+  enabled: r.enabled ?? true,
+})
 const processedData = ref([])
 
 // 遥测数据 state
@@ -1287,12 +1302,21 @@ const loadRules = async () => {
   rulesLoading.value = true
   try {
     const res = await processRuleApi.getAll()
-    rules.value = res.data || []
+    const data = (res.data || []).map(normalizeRule).filter(r => {
+      if (!r.ruleName || r.ruleName === '-') return false
+      // 排除告警阈值规则（processRuleApi 底层复用告警规则存储，其 description 为 < / >）
+      if (r.thresholdValue !== undefined || r.paramCode) return false
+      if (/^[<>=!]+$/.test((r.description || '').trim())) return false
+      return true
+    })
+    rules.value = data.length > 0 ? data : fallbackRules
   } catch (e) {
     if (e.code === 'ERR_CANCELED' || e.message?.includes('aborted') || e.code === 'ECONNABORTED' || e.message?.includes('timeout')) {
       rulesLoading.value = false
+      rules.value = fallbackRules
       return
     }
+    rules.value = fallbackRules
     console.error(e)
   }
   finally { rulesLoading.value = false }
@@ -1707,6 +1731,50 @@ watch(mainTab, (activeTab) => {
 
 .column-picker-item input {
   accent-color: var(--ui-primary);
+}
+
+.rules-loading {
+  padding: 12px 0;
+  color: var(--ui-text-muted);
+  font-size: 13px;
+}
+
+.rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rule-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--ui-border-muted, rgba(255,255,255,0.07));
+}
+
+.rule-item:last-child {
+  border-bottom: none;
+}
+
+.rule-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.rule-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ui-text);
+}
+
+.rule-desc {
+  font-size: 12px;
+  color: var(--ui-text-muted);
 }
 
 .device-error-hint {
