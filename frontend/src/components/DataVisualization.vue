@@ -3,13 +3,33 @@
     <!-- 顶部工具栏：试验任务 + 操作按钮 -->
     <div class="toolbar">
       <div class="toolbar-left">
+        <label class="toolbar-label">任务来源</label>
+        <div class="source-toggle">
+          <button :class="['source-btn', taskSource === 'local' ? 'source-btn-active' : '']" @click="taskSource = 'local'">本系统</button>
+          <button :class="['source-btn', taskSource === 'external' ? 'source-btn-active' : '']" @click="taskSource = 'external'">外部通知</button>
+        </div>
         <label class="toolbar-label">试验任务</label>
-        <UiSelect v-model:value="selectedExperimentTask" class="task-filter-select" placeholder="请选择试验任务">
-          <UiSelectOption value="">全部试验任务</UiSelectOption>
-          <UiSelectOption v-for="task in experimentTaskOptions" :key="task.value" :value="task.value">
-            {{ task.label }}
-          </UiSelectOption>
-        </UiSelect>
+        <template v-if="taskSource === 'local'">
+          <UiSelect
+            v-model:value="selectedExperimentTask"
+            class="task-filter-select"
+            placeholder="请选择试验任务"
+            show-search
+            :filter-option="filterTaskOption"
+          >
+            <UiSelectOption value="">全部试验任务</UiSelectOption>
+            <UiSelectOption v-for="task in experimentTaskOptions" :key="task.value" :value="task.value">
+              {{ task.label }}
+            </UiSelectOption>
+          </UiSelect>
+        </template>
+        <template v-else>
+          <div class="external-task-box">
+            <span class="ext-dot" :class="externalTask ? 'ext-dot-on' : 'ext-dot-wait'"></span>
+            <span class="ext-task-name">{{ externalTask ? externalTask.label : '等待外部通知...' }}</span>
+            <span v-if="externalTask" class="ext-task-meta">来自 {{ externalTask.source }} · {{ externalTask.receivedAt }}</span>
+          </div>
+        </template>
       </div>
       <div class="toolbar-right">
         <button type="button" class="toolbar-btn" @click="exportConfig">导出配置</button>
@@ -174,7 +194,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { telemetryApi, processTaskApi, alarmApi } from '../api'
 import { getRuntimeConfig, isMockEnabled } from '../config/runtime'
 import ParamTreeSelect from './ParamTreeSelect.vue'
@@ -187,6 +207,45 @@ const LAYOUT_STORAGE_KEY = 'viz.layout.v1'
 
 const selectedExperimentTask = ref('')
 const tasks = ref([])
+
+const taskSource = ref('local')
+const externalTask = ref(null)
+
+const externalTaskCandidates = [
+  { value: 'ext-001', label: '星地联合测试任务-2026A', source: '任务规划模块' },
+  { value: 'ext-002', label: '载荷定标试验-夜间段', source: '调度系统' },
+  { value: 'ext-003', label: '轨道机动验证任务', source: '飞行控制模块' },
+  { value: 'ext-004', label: '多星协同观测任务', source: '指挥控制模块' },
+]
+
+let externalNotifyTimer = null
+
+const startExternalNotify = () => {
+  externalTask.value = null
+  externalNotifyTimer = setTimeout(() => {
+    const candidate = externalTaskCandidates[Math.floor(Math.random() * externalTaskCandidates.length)]
+    const pad = n => String(n).padStart(2, '0')
+    const now = new Date()
+    externalTask.value = {
+      ...candidate,
+      receivedAt: `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`,
+    }
+  }, 1800)
+}
+
+watch(taskSource, (v) => {
+  if (v === 'external') {
+    startExternalNotify()
+  } else {
+    clearTimeout(externalNotifyTimer)
+    externalTask.value = null
+  }
+})
+
+const filterTaskOption = (input, option) => {
+  const label = String(option?.children?.[0] ?? option?.label ?? '').toLowerCase()
+  return label.includes(input.toLowerCase())
+}
 const alarms = ref([])
 const vizTelemetryCache = ref([])
 
@@ -1005,6 +1064,7 @@ onUnmounted(() => {
   if (alarmTimer) clearInterval(alarmTimer)
   if (alarmSocket) alarmSocket.close()
   if (resizeObserver) resizeObserver.disconnect()
+  if (externalNotifyTimer) clearTimeout(externalNotifyTimer)
   window.removeEventListener('resize', onWindowResize)
 })
 </script>
@@ -1043,7 +1103,90 @@ onUnmounted(() => {
 }
 
 .task-filter-select {
-  width: min(320px, 100%);
+  width: min(260px, 100%);
+}
+
+.source-toggle {
+  display: flex;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  overflow: hidden;
+  flex: none;
+}
+
+.source-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border: none;
+  background: transparent;
+  color: var(--ui-text-muted);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+  white-space: nowrap;
+  line-height: 22px;
+}
+
+.source-btn:hover {
+  color: var(--ui-text);
+  background: color-mix(in srgb, var(--ui-primary) 8%, transparent);
+}
+
+.source-btn-active {
+  background: var(--ui-primary);
+  color: #fff;
+}
+
+.source-btn-active:hover {
+  background: color-mix(in srgb, var(--ui-primary) 90%, black);
+  color: #fff;
+}
+
+.external-task-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg);
+  min-width: 260px;
+  max-width: 420px;
+}
+
+.ext-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+.ext-dot-wait {
+  background: var(--ui-text-muted);
+  opacity: 0.4;
+}
+
+.ext-dot-on {
+  background: var(--ui-success, #22c55e);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-success, #22c55e) 25%, transparent);
+}
+
+.ext-task-name {
+  font-size: 13px;
+  color: var(--ui-text);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ext-task-meta {
+  font-size: 11px;
+  color: var(--ui-text-muted);
+  flex: none;
+  white-space: nowrap;
 }
 
 .toolbar-right {
